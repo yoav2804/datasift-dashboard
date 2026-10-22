@@ -1,6 +1,6 @@
 // Supabase REST + Storage helpers (server only). Service key never reaches the browser.
-const URL_ = process.env.SUPABASE_URL!.replace(/\/$/, "");
-const KEY = process.env.SUPABASE_SERVICE_KEY!;
+const URL_ = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
+const KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const REST = `${URL_}/rest/v1`;
 export const STORAGE = `${URL_}/storage/v1`;
 const h = (extra: Record<string, string> = {}) => ({ apikey: KEY, Authorization: `Bearer ${KEY}`, "Content-Type": "application/json", ...extra });
