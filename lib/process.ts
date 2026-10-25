@@ -142,7 +142,6 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       if (sameHist.length && !otherHist.length) { existingL.push({ ...i, ghl: null, priorPull: sameHist[0].first_pull_id }); continue; }
       if (otherHist.length) { review.push({ ...i, reason: "shared_in_history", other: otherHist }); continue; }
       if (batchProps.get(p)!.size > 1) { review.push({ ...i, reason: "shared_in_batch" }); continue; }
-      if (i.dnc) { held.push({ ...i, reason: "held: PropStream DNC flag" }); continue; }
       fresh.push(i);
     }
 
