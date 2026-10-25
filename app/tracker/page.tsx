@@ -2,52 +2,78 @@ import Nav from "../nav";
 import { select } from "@/lib/sb";
 import SyncButton from "./sync";
 export const dynamic = "force-dynamic";
+
 const n = (v: any) => (v ?? 0).toLocaleString();
+const STEPS = ["contacted", "replied", "interested", "qualified", "wrong_number", "opt_out", "contract", "closed"];
+type Row = { sent: Set<string>; ev: Record<string, Set<string>> };
+const blank = (): Row => ({ sent: new Set(), ev: Object.fromEntries(STEPS.map((s) => [s, new Set<string>()])) });
+const per = (doors: number, hits: number) => (hits ? Math.round(doors / hits).toLocaleString() : "–");
+const pct = (a: number, b: number) => (b ? `${((a / b) * 100).toFixed(1)}%` : "–");
+
+function Table({ title, rows, label, extra }: { title: string; rows: [string, Row][]; label: string; extra?: (k: string) => any }) {
+  return (<><h2>{title}</h2>
+    <div className="tablewrap"><table><thead><tr><th>{label}</th>{extra && <th>DataSift doors/deal</th>}<th>Sent to GHL</th><th>Texted</th><th>Replied</th><th>Leads</th>
+      <th>Leads per 100 texted</th><th>Doors per lead</th><th>Contracts</th><th>Doors per contract</th><th>Closed</th><th>Doors per deal</th><th>Wrong # (of replies)</th><th>Opt outs</th></tr></thead><tbody>
+      {rows.map(([k, r]) => { const t = r.ev.contacted.size, q = r.ev.qualified.size;
+        return (<tr key={k}><td>{k}{t > 0 && t < 300 && <span className="tag warn" style={{ marginLeft: 6 }}>small sample</span>}</td>{extra && <td>{extra(k)}</td>}
+          <td>{n(r.sent.size)}</td><td>{n(t)}</td><td>{n(r.ev.replied.size)} <span className="muted">{pct(r.ev.replied.size, t)}</span></td><td><b>{n(q)}</b></td>
+          <td><b>{t ? ((q / t) * 100).toFixed(2) : "–"}</b></td><td>{per(t, q)}</td><td>{n(r.ev.contract.size)}</td><td>{per(t, r.ev.contract.size)}</td>
+          <td>{n(r.ev.closed.size)}</td><td>{per(t, r.ev.closed.size)}</td><td>{pct(r.ev.wrong_number.size, r.ev.replied.size)}</td><td>{n(r.ev.opt_out.size)}</td></tr>); })}
+      {!rows.length && <tr><td colSpan={14} className="muted">Nothing yet. Numbers appear after your first upload is imported into GHL and texting starts.</td></tr>}
+    </tbody></table></div></>);
+}
+
 export default async function Tracker() {
-  const [batches, tasks, profiles, zips, markets, ghlDnd, reviewOpen] = await Promise.all([
-    select("export_batches", { select: "pull_id,counts,created_at", order: "created_at.asc" }), select("pull_tasks", { select: "pull_id,profile_id,zip_group,market_fips" }),
-    select("profiles", { select: "profile_id,rung,name,priority,doors_per_deal" }), select("zip_priorities", { select: "zip,zip_group,rating,doors_per_deal" }),
-    select("markets", {}), select("ghl_contacts", { dnd: "eq.true", select: "contact_id" }), select("review_cases", { status: "eq.open", select: "case_id" })]);
-  const t = new Map(tasks.map((x: any) => [x.pull_id, x])); const p = new Map(profiles.map((x: any) => [x.profile_id, x]));
-  const zg = new Map(zips.map((z: any) => [z.zip, z]));
-  const sum = (k: string) => batches.reduce((s: number, b: any) => s + (b.counts?.[k] || 0), 0);
-  const byProf = new Map<string, any>(); const byZip = new Map<string, number>();
-  for (const b of batches) {
-    const task: any = t.get(b.pull_id) || {}; const key = task.profile_id || "(no list / test)";
-    const r = byProf.get(key) || { pulls: 0, props: 0, fresh: 0, imp: 0, review: 0, held: 0 };
-    r.pulls++; r.props += b.counts.unique_properties || 0; r.fresh += b.counts.net_new_properties || 0; r.imp += b.counts.import_rows || 0; r.review += b.counts.multi_property_review || 0; r.held += b.counts.held_propstream_dnc || 0;
-    byProf.set(key, r);
-    for (const [z, c] of Object.entries(b.counts.zip_distribution || {})) byZip.set(z, (byZip.get(z) || 0) + (c as number));
-  }
+  const [exported, batches, tasks, profiles, zips, markets, outcomes] = await Promise.all([
+    select("export_rows", { bucket: "eq.new", select: "property_id,batch_id" }), select("export_batches", { select: "batch_id,pull_id" }),
+    select("pull_tasks", { select: "pull_id,profile_id,market_fips" }), select("profiles", { select: "profile_id,name,market_fips,doors_per_deal" }),
+    select("zip_priorities", { select: "market_fips,zip,zip_group,doors_per_deal" }), select("markets", {}), select("outcomes", { select: "property_id,pull_id,event" })]);
+  const bPull = new Map(batches.map((b: any) => [b.batch_id, b.pull_id]));
+  const tk = new Map(tasks.map((t: any) => [t.pull_id, t])); const pf = new Map(profiles.map((p: any) => [p.profile_id, p]));
+  const mk = new Map(markets.map((m: any) => [m.fips, m.name]));
+  const pids = Array.from(new Set([...exported.map((e: any) => e.property_id), ...outcomes.map((o: any) => o.property_id)].filter(Boolean)));
+  const prop = new Map<string, any>();
+  for (let i = 0; i < pids.length; i += 150) for (const p of await select("properties", { property_id: `in.(${pids.slice(i, i + 150).join(",")})`, select: "property_id,zip,market_fips" })) prop.set(p.property_id, p);
+  const zinfo = new Map(zips.map((z: any) => [`${z.market_fips}|${z.zip}`, z]));
+
+  // primary attribution: the first pull that exported the property
+  const firstPull = new Map<string, string>();
+  for (const e of exported) { const pl = bPull.get(e.batch_id); if (pl && !firstPull.has(e.property_id)) firstPull.set(e.property_id, pl as string); }
+  const all = blank(), byM = new Map<string, Row>(), byL = new Map<string, Row>(), byZ = new Map<string, Row>();
+  const keys = (pid: string, pullId?: string) => {
+    const p = prop.get(pid) || {}; const t: any = tk.get(pullId || firstPull.get(pid) || "") || {}; const pr: any = pf.get(t.profile_id);
+    const m = mk.get(p.market_fips) || "Other";
+    const z = zinfo.get(`${p.market_fips}|${p.zip}`);
+    return { m, l: pr ? `${pr.name} (${m === "St. Louis County" ? "County" : m === "St. Louis City" ? "City" : m})` : "Test / no list", z: `${p.zip || "?"} · ${m === "St. Louis County" ? "County" : "City"}${z ? ` · group ${z.zip_group}` : ""}` };
+  };
+  const get = (map: Map<string, Row>, k: string) => { if (!map.has(k)) map.set(k, blank()); return map.get(k)!; };
+  for (const e of exported) { const k = keys(e.property_id); for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z)]) r.sent.add(e.property_id); }
+  for (const o of outcomes) { if (!o.property_id || !STEPS.includes(o.event)) continue; const k = keys(o.property_id, o.pull_id);
+    for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z)]) r.ev[o.event].add(o.property_id); }
+  const sort = (m: Map<string, Row>) => Array.from(m.entries()).sort((a, b) => b[1].ev.contacted.size - a[1].ev.contacted.size || b[1].sent.size - a[1].sent.size);
+  const dsByList = new Map(profiles.map((p: any) => [`${p.name} (${p.market_fips === "29189" ? "County" : "City"})`, p.doors_per_deal]));
+  const t = all.ev.contacted.size, q = all.ev.qualified.size;
   const city = markets.find((m: any) => m.fips === "29510");
+
   return (<>
     <Nav on="Tracker" />
     <h1>Tracker</h1>
-    <p className="sub">Everything we have pulled, and later what it turned into in GHL.</p>
+    <p className="sub">Every number counts doors (properties), not people or messages. A lead is a seller who reached Qualified in GHL. Only contacts that came from a pull in this system are counted.</p>
     <div className="grid">
-      <div className="stat"><div className="big">{n(sum("unique_properties"))}</div><div className="muted">properties pulled</div></div>
-      <div className="stat"><div className="big">{n(sum("net_new_properties"))}</div><div className="muted">net new properties</div></div>
-      <div className="stat"><div className="big">{n(sum("import_rows"))}</div><div className="muted">contacts ready for GHL</div></div>
-      <div className="stat"><div className="big">{n(sum("already_in_ghl"))}</div><div className="muted">numbers already in GHL</div></div>
-      <div className="stat"><div className="big">{n(reviewOpen.length)}</div><div className="muted">open review cases</div></div>
-      <div className="stat"><div className="big">{n(sum("held_propstream_dnc"))}</div><div className="muted">held (PropStream DNC)</div></div>
+      <div className="stat"><div className="big">{n(all.sent.size)}</div><div className="muted">doors sent to GHL</div></div>
+      <div className="stat"><div className="big">{n(t)}</div><div className="muted">doors texted</div></div>
+      <div className="stat"><div className="big">{pct(all.ev.replied.size, t)}</div><div className="muted">reply rate</div></div>
+      <div className="stat"><div className="big">{n(q)}</div><div className="muted">qualified leads</div></div>
+      <div className="stat"><div className="big">{per(t, q)}</div><div className="muted">doors per lead</div></div>
+      <div className="stat"><div className="big">{per(t, all.ev.contract.size)}</div><div className="muted">doors per contract</div></div>
+      <div className="stat"><div className="big">{per(t, all.ev.closed.size)}</div><div className="muted">doors per deal</div></div>
     </div>
-    <h2>Results from GHL</h2>
-    <div className="card"><div className="row"><div>
-      <div><b>Replies, qualified leads, contracts, closed deals and doors per deal</b> will show here per list and ZIP.</div>
-      <div className="muted">This switches on once imported contacts carry their DS Pull ID in GHL (step 2) and the results sync is connected (step 3).</div>
-      <div className="muted" style={{ marginTop: 8 }}>{city?.notes} · {n(ghlDnd.length)} contacts are DND in GHL.</div></div>
+    <div className="card" style={{ marginTop: 16 }}><div className="row"><div>
+      <div><b>Contracts and closed deals</b> happen in TJ Capital, so they show once that account is connected (read only).</div>
+      <div className="muted" style={{ marginTop: 6 }}>Results refresh every night. {city?.notes?.match(/Last GHL sync[^,]*/)?.[0] || ""}</div></div>
       <SyncButton /></div></div>
-    <h2>By list</h2>
-    <div className="tablewrap"><table><thead><tr><th>List</th><th>DataSift doors/deal</th><th>Pulls</th><th>Properties</th><th>Net new</th><th>Import rows</th><th>Review</th><th>Held DNC</th><th>Our doors/deal</th></tr></thead><tbody>
-      {Array.from(byProf.entries()).map(([k, r]) => { const pr: any = p.get(k); return (<tr key={k}><td>{pr ? `#${pr.rung} ${pr.name}` : k}</td><td>{pr?.doors_per_deal ?? ""}</td>
-        <td>{r.pulls}</td><td>{n(r.props)}</td><td>{n(r.fresh)}</td><td>{n(r.imp)}</td><td>{n(r.review)}</td><td>{n(r.held)}</td><td className="muted">pending</td></tr>); })}
-      {!byProf.size && <tr><td colSpan={9} className="muted">No pulls processed yet.</td></tr>}
-    </tbody></table></div>
-    <h2>By ZIP</h2>
-    <div className="tablewrap"><table><thead><tr><th>ZIP</th><th>Group</th><th>DataSift rating</th><th>DataSift doors/deal</th><th>Properties pulled</th><th>Our doors/deal</th></tr></thead><tbody>
-      {Array.from(byZip.entries()).sort((a, b) => b[1] - a[1]).map(([z, c]) => { const zz: any = zg.get(z) || {}; return (<tr key={z}><td>{z}</td><td>{zz.zip_group || "outside City list"}</td>
-        <td>{zz.rating ?? ""}</td><td>{zz.doors_per_deal ?? ""}</td><td>{n(c)}</td><td className="muted">pending</td></tr>); })}
-    </tbody></table></div>
+    <Table title="By market" rows={sort(byM)} label="Market" />
+    <Table title="By list" rows={sort(byL)} label="List" extra={(k) => dsByList.get(k) ?? ""} />
+    <Table title="By ZIP" rows={sort(byZ)} label="ZIP" />
   </>);
 }
