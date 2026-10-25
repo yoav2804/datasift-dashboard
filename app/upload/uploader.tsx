@@ -1,8 +1,9 @@
 "use client";
 import { useState } from "react";
 const LABELS: [string, string][] = [["rows_in_file", "Rows in file"], ["net_new_properties", "New properties"], ["already_known_properties", "Already known"],
-  ["import_rows", "GHL import rows"], ["new_numbers", "New cell numbers"], ["already_in_ghl", "Already in GHL"], ["multi_property_review", "To review"],
-  ["held_propstream_dnc", "Held (PropStream DNC)"], ["landlines", "Landlines removed"], ["non_residential_numbers", "Non-residential removed"], ["litigator_numbers", "Litigator removed"]];
+  ["import_rows", "GHL import rows"], ["import_rows_new", "New contacts"], ["import_rows_duplicates", "Duplicates (included)"], ["import_rows_may_create_second_contact", "May create 2nd contact"],
+  ["already_in_ghl", "Numbers already in GHL"], ["multi_property_review", "Multi-property"],
+  ["landlines", "Landlines removed"], ["non_residential_numbers", "Non-residential removed"], ["litigator_numbers", "Litigator removed"]];
 export default function Uploader({ options, preset }: { options: { id: string; label: string }[]; preset: string }) {
   const [pull, setPull] = useState(preset || options[0]?.id || ""); const [file, setFile] = useState<File | null>(null);
   const [step, setStep] = useState(""); const [err, setErr] = useState(""); const [rep, setRep] = useState<any>(null);
