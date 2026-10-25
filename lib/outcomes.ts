@@ -50,13 +50,14 @@ export async function syncOutcomes() {
     if (!prev || b.created_at < prev.at) byPhone.set(e.phone, { property_id: e.property_id, pull_id: b.pull_id, at: b.created_at });
   }
   const contactIds = Array.from(new Set(opps.map((o) => o.contactId)));
-  const cPhones = new Map<string, string[]>(), cAdded = new Map<string, string>();
+  const cPhones = new Map<string, string[]>(), cAdded = new Map<string, string>(), cWrong = new Set<string>();
   for (let i = 0; i < contactIds.length; i += 150) {
     const part = contactIds.slice(i, i + 150);
     for (const r of await select("ghl_contact_phones", { contact_id: `in.(${part.join(",")})`, select: "phone,contact_id" }))
       cPhones.set(r.contact_id, [...(cPhones.get(r.contact_id) || []), r.phone]);
-    for (const r of await select("ghl_contacts", { contact_id: `in.(${part.join(",")})`, select: "contact_id,date_added,raw" })) {
+    for (const r of await select("ghl_contacts", { contact_id: `in.(${part.join(",")})`, select: "contact_id,date_added,raw,tags" })) {
       cAdded.set(r.contact_id, r.date_added);
+      if ((r.tags || []).some((t: string) => /wrong number/i.test(t))) cWrong.add(r.contact_id);  // tag stays even after the phone rotates
       if (r.raw?.dsPropertyId) cPhones.set(r.contact_id, [`PID:${r.raw.dsPropertyId}`, ...(cPhones.get(r.contact_id) || [])]);
     }
   }
@@ -77,6 +78,7 @@ export async function syncOutcomes() {
     const a = attr(o.contactId); if (!a) continue;   // only count contacts that came from our pulls
     const steps = new Set(STEP[st.stage] || ["contacted"]);
     if (o.status === "won") steps.add("qualified");
+    if (cWrong.has(o.contactId)) { steps.add("contacted"); steps.add("replied"); steps.add("wrong_number"); }
     for (const ev of Array.from(steps)) rows.push({ ghl_location_id: loc, ghl_contact_id: o.contactId, ghl_opportunity_id: o.id, property_id: a.property_id,
       pull_id: a.pull_id, primary_profile_id: (pulls.get(a.pull_id) as any)?.profile_id || null, event: ev, pipeline: st.pipeline, stage: st.stage,
       occurred_at: o.lastStageChangeAt || o.updatedAt || o.createdAt });
