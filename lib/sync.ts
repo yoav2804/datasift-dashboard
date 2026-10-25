@@ -7,7 +7,8 @@ export async function syncGhl() {
   const loc = process.env.GHL_LOCATION_ID!;
   const cf = await ghlGet(`locations/${loc}/customFields`, {});
   const phoneFields: Record<string, string> = {};
-  for (const f of cf.customFields || []) if (["Phone 2", "Phone 3", "Phone 4"].includes(f.name)) phoneFields[f.id] = f.name;
+  let dsPid = "";
+  for (const f of cf.customFields || []) { if (["Phone 2", "Phone 3", "Phone 4"].includes(f.name)) phoneFields[f.id] = f.name; if (f.name === "DS Property ID") dsPid = f.id; }
   const contacts: any[] = [], links: any[] = [];
   let afterId: string | undefined, after: string | undefined;
   for (;;) {
@@ -17,7 +18,8 @@ export async function syncGhl() {
     for (const c of batch) {
       contacts.push({ contact_id: c.id, location_id: loc, name: c.contactName || [c.firstName, c.lastName].filter(Boolean).join(" "), dnd: !!c.dnd, tags: c.tags || [],
         date_added: c.dateAdded, synced_at: new Date().toISOString(),
-        raw: { address: [c.address1, c.city, c.state, c.postalCode].filter(Boolean).join(" "), address1: c.address1, postalCode: c.postalCode, firstName: c.firstName, lastName: c.lastName } });
+        raw: { address: [c.address1, c.city, c.state, c.postalCode].filter(Boolean).join(" "), address1: c.address1, postalCode: c.postalCode, firstName: c.firstName, lastName: c.lastName,
+          dsPropertyId: (c.customFields || []).find((f: any) => f.id === dsPid)?.value || null } });
       const seen = new Set<string>();
       const vals: [string, any][] = [["phone", c.phone], ...(c.customFields || []).filter((f: any) => phoneFields[f.id]).map((f: any) => [phoneFields[f.id], f.value] as [string, any])];
       for (const [field, v] of vals) { const n = norm(v); if (n && !seen.has(n)) { seen.add(n); links.push({ phone: n, contact_id: c.id, field }); } }
