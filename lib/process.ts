@@ -110,9 +110,11 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       }
     }
     const allp = Array.from(new Set(items.map((i) => i.phone))) as string[];
-    const ghl = new Map<string, string[]>(), hist = new Map<string, any[]>();
-    for (const g of await inChunks(allp, 150, (part) => select("ghl_contact_phones", { phone: `in.(${part.join(",")})`, select: "phone,contact_id" })))
+    const ghl = new Map<string, string[]>(), hist = new Map<string, any[]>(), ghlMain = new Set<string>();
+    for (const g of await inChunks(allp, 150, (part) => select("ghl_contact_phones", { phone: `in.(${part.join(",")})`, select: "phone,contact_id,field" }))) {
       ghl.set(g.phone, [...(ghl.get(g.phone) || []), g.contact_id]);
+      if (g.field === "phone") ghlMain.add(g.phone);   // GHL only matches duplicates on the main Phone field
+    }
     for (const h of await inChunks(allp, 150, (part) => select("property_phones", { phone: `in.(${part.join(",")})`, select: "phone,property_id,first_pull_id" })))
       hist.set(h.phone, [...(hist.get(h.phone) || []), h]);
     const cids = Array.from(new Set(Array.from(ghl.values()).flat()));
@@ -185,16 +187,26 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     const outExc = excluded.map((i) => ({ ...base(i), Reason: i.reason }));
     const outHeld = held.map((i) => ({ ...base(i), Reason: i.reason }));
 
+    // import file: new numbers AND duplicates (GHL decides on import). Each phone keeps its status.
     const imp = new Map<string, any[]>();
-    for (const i of fresh) imp.set(i.x.pid, [...(imp.get(i.x.pid) || []), i]);
+    const status = (i: any, s: string) => ({ ...i, st: s });
+    for (const i of [...fresh.map((i) => status(i, "new")), ...existingL.map((i) => status(i, i.ghl ? "in_ghl" : "seen_before")), ...review.map((i) => status(i, "review"))])
+      imp.set(i.x.pid, [...(imp.get(i.x.pid) || []), i]);
+    let dupRows = 0, trapRows = 0;
     const outImp: any[] = [];
     imp.forEach((ph0, pid) => {
-      const r = ph0[0].x.r; const ph = ph0.sort((a, b) => a.slot - b.slot).slice(0, 4);
+      const r = ph0[0].x.r;
+      // a number GHL already has as a main Phone goes first, so GHL matches the existing contact instead of creating a duplicate
+      const ph = ph0.sort((a, b) => (ghlMain.has(b.phone) ? 1 : 0) - (ghlMain.has(a.phone) ? 1 : 0) || a.slot - b.slot).slice(0, 4);
+      const isDup = ph.some((q) => q.st !== "new");
+      const trap = ph.some((q) => ghl.has(q.phone)) && !ghlMain.has(ph[0].phone);
+      if (isDup) dupRows++; if (trap) trapRows++;
       const row: any = { "First Name": r["Owner 1 First Name"] || "", "Last Name": r["Owner 1 Last Name"] || "", Phone: ph[0].phone, "Phone Type": ph[0].type,
         "Phone 2": ph[1]?.phone || "", "Phone 2 Type": ph[1]?.type || "", "Phone 3": ph[2]?.phone || "", "Phone 3 Type": ph[2]?.type || "", "Phone 4": ph[3]?.phone || "", "Phone 4 Type": ph[3]?.type || "",
         Address: r["Address"], City: r["City"], State: r["State"], "Postal Code": z5(r["Zip"]),
         "Property Address For AI": `${r["Address"]}, ${r["City"]}, ${r["State"]} ${z5(r["Zip"])}`,
-        "DS Property ID": pid, "DS Pull ID": pullId, "DS Profile": profileId || "", "DS ZIP Group": pt.zip_group || "", "DS Market": ph0[0].x.market || "" };
+        "DS Property ID": pid, "DS Pull ID": pullId, "DS Profile": profileId || "", "DS ZIP Group": pt.zip_group || "", "DS Market": ph0[0].x.market || "",
+        "DS Status": !isDup ? "New" : trap ? "Duplicate: GHL may create a 2nd contact" : ph.some((q) => q.st === "in_ghl") ? "Duplicate: already in GHL" : ph.some((q) => q.st === "review") ? "Duplicate: multi-property" : "Duplicate: seen in earlier pull" };
       outImp.push(row);
     });
 
@@ -207,7 +219,8 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       invalid_numbers: excluded.filter((e) => e.reason === "invalid number").length, landlines: excluded.filter((e) => e.reason === "landline").length,
       litigator_numbers: excluded.filter((e) => e.reason.startsWith("litigator")).length, non_residential_numbers: excluded.filter((e) => e.reason.startsWith("non-residential")).length,
       held_propstream_dnc: held.length, already_in_ghl: existingL.filter((i) => i.ghl).length, already_in_our_database_not_ghl: existingL.filter((i) => !i.ghl).length,
-      existing_ghl_dnd: existingL.filter((i) => i.ghl?.dnd).length, multi_property_review: review.length, new_numbers: fresh.length, import_rows: outImp.length, zip_distribution: zipDist };
+      existing_ghl_dnd: existingL.filter((i) => i.ghl?.dnd).length, multi_property_review: review.length, new_numbers: fresh.length, import_rows: outImp.length,
+      import_rows_new: outImp.length - dupRows, import_rows_duplicates: dupRows, import_rows_may_create_second_contact: trapRows, zip_distribution: zipDist };
 
     const out = XLSX.utils.book_new();
     const add = (name: string, data: any[]) => XLSX.utils.book_append_sheet(out, data.length ? XLSX.utils.json_to_sheet(data) : XLSX.utils.aoa_to_sheet([["(none)"]]), name);
