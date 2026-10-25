@@ -30,6 +30,10 @@ export default function Uploader({ options, preset }: { options: { id: string; l
       {err && <div className="err">{err}</div>}
       {rep && <div>
         <h2 style={{ marginTop: 10 }}>Done</h2>
+        <div className="card" style={{ background: "var(--bg)" }}>
+          <div><b>Duplicates:</b> {rep.already_known_properties} of {rep.unique_properties} properties ({rep.pct_already_known}%) were already in our database. {rep.import_rows_duplicates} of {rep.import_rows} CSV rows are duplicates.</div>
+          {rep.refresh_note && <div style={{ marginTop: 6 }}><b>List freshness:</b> {rep.pct_new_to_list}% new to this list. {rep.refresh_note} {rep.next_pull_date && <>Next pull: <b>{rep.next_pull_date}</b>.</>}</div>}
+        </div>
         <div className="grid">{LABELS.map(([k, l]) => <div className="stat" key={k}><div className="big">{rep[k] ?? 0}</div><div className="muted">{l}</div></div>)}</div>
         <p style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
           <a className="btn primary" href={`/api/download?path=${encodeURIComponent(rep.files.import_csv)}`}>Download GHL import CSV</a>
