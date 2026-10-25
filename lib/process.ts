@@ -82,6 +82,12 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
 
     await upsert("property_pulls", props.map((x) => ({ property_id: x.pid, pull_id: pullId, upload_id: upload.upload_id, was_new: x.wasNew,
       raw: Object.fromEntries(Object.entries(x.r).filter(([, v]) => v !== null)) })), { onConflict: "property_id,pull_id" });
+    // list lifespan: which of these properties were already on THIS list in an earlier pull
+    const seenOnList = new Set<string>(); let lastListPull: any = null;
+    if (profileId) {
+      for (const r of await inChunks(props.map((x) => x.pid), 150, (part) => select("property_profiles", { profile_id: `eq.${profileId}`, property_id: `in.(${part.join(",")})`, select: "property_id" }))) seenOnList.add(r.property_id);
+      lastListPull = (await select("pull_tasks", { profile_id: `eq.${profileId}`, zip_group: `eq.${pt.zip_group}`, status: "eq.processed", order: "completed_date.desc", select: "pull_id,completed_date" }))[0];
+    }
     if (profileId) await upsert("property_profiles", props.map((x) => ({ property_id: x.pid, profile_id: profileId, first_pull_id: pullId })), { onConflict: "property_id,profile_id", ignore: true });
 
     // ---------- owners ----------
@@ -210,6 +216,18 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       outImp.push(row);
     });
 
+    // refresh rate -> when to pull this list again
+    const newToList = props.filter((x) => !seenOnList.has(x.pid)).length;
+    const freshShare = props.length ? newToList / props.length : 1;
+    let nextDays = 30, refreshNote = "First pull of this list. Pull it again in 30 days to measure how fast it refreshes.";
+    if (lastListPull && seenOnList.size > 0) {
+      const gap = Math.max(7, (Date.now() - Date.parse(lastListPull.completed_date)) / 864e5);
+      const perMonth = (freshShare * 30) / Math.max(gap, 30);  // never extrapolate up from a short gap
+      nextDays = perMonth >= 0.5 ? 30 : perMonth >= 0.25 ? 60 : perMonth >= 0.1 ? 90 : 180;
+      refreshNote = `${Math.round(freshShare * 100)}% of this list was new after ${Math.round(gap)} days (about ${Math.round(perMonth * 100)}% a month), so next pull in ${nextDays} days.`;
+    }
+    const nextDate = new Date(Date.now() + nextDays * 864e5).toISOString().slice(0, 10);
+
     const zipDist: Record<string, number> = {};
     for (const x of props) { const z = z5(x.r["Zip"]); zipDist[z] = (zipDist[z] || 0) + 1; }
     const report: any = { pull_id: pullId, file: filename, rows_in_file: RECS.length, duplicate_rows_in_file: dupInFile, unique_properties: props.length,
@@ -220,7 +238,10 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       litigator_numbers: excluded.filter((e) => e.reason.startsWith("litigator")).length, non_residential_numbers: excluded.filter((e) => e.reason.startsWith("non-residential")).length,
       held_propstream_dnc: held.length, already_in_ghl: existingL.filter((i) => i.ghl).length, already_in_our_database_not_ghl: existingL.filter((i) => !i.ghl).length,
       existing_ghl_dnd: existingL.filter((i) => i.ghl?.dnd).length, multi_property_review: review.length, new_numbers: fresh.length, import_rows: outImp.length,
-      import_rows_new: outImp.length - dupRows, import_rows_duplicates: dupRows, import_rows_may_create_second_contact: trapRows, zip_distribution: zipDist };
+      import_rows_new: outImp.length - dupRows, import_rows_duplicates: dupRows, import_rows_may_create_second_contact: trapRows,
+      properties_new_to_list: newToList, properties_already_on_list: props.length - newToList, pct_new_to_list: Math.round(freshShare * 1000) / 10,
+      pct_already_known: props.length ? Math.round((props.filter((x) => !x.wasNew).length / props.length) * 1000) / 10 : 0,
+      refresh_note: profileId ? refreshNote : "", next_pull_date: profileId ? nextDate : null, zip_distribution: zipDist };
 
     const out = XLSX.utils.book_new();
     const add = (name: string, data: any[]) => XLSX.utils.book_append_sheet(out, data.length ? XLSX.utils.json_to_sheet(data) : XLSX.utils.aoa_to_sheet([["(none)"]]), name);
@@ -245,7 +266,10 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     await update("uploads", { upload_id: `eq.${upload.upload_id}` }, { report });
     await update("pull_tasks", { pull_id: `eq.${pullId}` }, { status: "processed", completed_date: NOW.slice(0, 10), rows_pulled: RECS.length,
       net_new_properties: report.net_new_properties, contacts_generated: outImp.length,
-      next_pull_date: pt.profile_id ? new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) : null });
+      next_pull_date: profileId ? nextDate : null });
+    if (profileId) await upsert("pull_tasks", [{ pull_id: `${pullId.replace(/-\d{8}$/, "")}-${nextDate.replace(/-/g, "")}`, market_fips: pt.market_fips, profile_id: profileId,
+      zip_group: pt.zip_group, zips: pt.zips, source_id: pt.source_id, priority: pt.priority, planned_date: nextDate, status: "planned", notes: `recycle: ${refreshNote}` }],
+      { onConflict: "pull_id", ignore: true });
     return report;
   } catch (e) {
     // let the same file be retried after a failure
