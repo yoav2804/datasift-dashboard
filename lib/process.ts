@@ -57,35 +57,78 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     for (const p of await inChunks(keys, 60, (part) => select("properties", { address_key: inList(part), select: "property_id,market_fips,apn,address_key" })))
       existing.set(`key|${p.address_key}`, p);
 
-    const fkOf = (x: any) => (x.apn ? `${x.market}|${x.apn}` : x.key);
-    const seen = new Map<string, string | null>();
+    // Resolve every row to ONE target property, using the same keys the database enforces:
+    // address_key (unique) and market+APN (unique when APN is set).
+    // 1) address already in the database -> that property
+    // 2) APN already in the database -> that property
+    // 3) otherwise a new property; rows that share an address or an APN become the same new property
+    const apnK = (x: any) => (x.apn ? `${x.market}|${x.apn}` : "");
+    const dbApnOwner = new Map<string, string>();   // market|apn -> property_id already holding it
+    existing.forEach((p) => { if (p.apn) dbApnOwner.set(`${p.market_fips}|${p.apn}`, p.property_id); });
+    const dbById = new Map<string, any>(); existing.forEach((p) => dbById.set(p.property_id, p));
+    for (const x of rows) {
+      const hit = existing.get(`key|${x.key}`) || (x.apn && existing.get(`apn|${x.market}|${x.apn}`));
+      if (hit) x.target = `pid:${hit.property_id}`;
+    }
+    // a new row that shares an APN with a row already tied to a known property joins that property
+    const apnTarget = new Map<string, string>();
+    for (const x of rows) if (x.target && apnK(x) && !apnTarget.has(apnK(x))) apnTarget.set(apnK(x), x.target);
+    for (const x of rows) if (!x.target && apnK(x) && apnTarget.has(apnK(x))) x.target = apnTarget.get(apnK(x));
+    // remaining new rows: union by address and by APN
+    const parent = new Map<string, string>();
+    const find = (a: string): string => { while (parent.get(a) !== a) { parent.set(a, parent.get(parent.get(a)!)!); a = parent.get(a)!; } return a; };
+    const join = (a: string, b: string) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(rb, ra); };
+    const fresh0 = rows.filter((x) => !x.target);
+    for (const x of fresh0) { parent.set(`k:${x.key}`, parent.get(`k:${x.key}`) || `k:${x.key}`); if (apnK(x)) parent.set(`a:${apnK(x)}`, parent.get(`a:${apnK(x)}`) || `a:${apnK(x)}`); }
+    for (const x of fresh0) if (apnK(x)) join(`k:${x.key}`, `a:${apnK(x)}`);
+    const clusterKey = new Map<string, string>();   // union root -> address_key of the first row in the cluster
+    for (const x of fresh0) { const root = find(`k:${x.key}`); if (!clusterKey.has(root)) clusterKey.set(root, x.key); x.target = `new:${clusterKey.get(root)}`; }
+
+    // build one record per target, merging every row that points to it (first row wins, blanks filled from the others)
+    const groups = new Map<string, any[]>();
+    for (const x of rows) groups.set(x.target, [...(groups.get(x.target) || []), x]);
+    const apnUsed = new Map(dbApnOwner);
     const props: any[] = [];
     let dupInFile = 0;
-    for (const x of rows) {
-      const fk = fkOf(x);
-      if (seen.has(fk)) { x.dup = true; dupInFile++; continue; }
-      const hit = (x.apn && existing.get(`apn|${x.market}|${x.apn}`)) || existing.get(`key|${x.key}`);
-      const r = x.r;
-      x.rec = { market_fips: x.market, apn: x.apn, address_key: hit ? hit.address_key : x.key, address: r["Address"], unit: r["Unit #"], city: r["City"], state: r["State"],
-        zip: z5(r["Zip"]), county: r["County"], property_type: r["Property Type"], last_seen_at: NOW,
-        latest: Object.fromEntries(LATEST.filter((k) => r[k]).map((k) => [k, r[k]])) };
-      if (hit) { x.pid = hit.property_id; x.wasNew = false; x.rec.property_id = hit.property_id; } else x.wasNew = true;
-      seen.set(fk, null); props.push(x);
-    }
+    groups.forEach((xs, target) => {
+      dupInFile += xs.length - 1;
+      const first = xs[0], isNew = target.startsWith("new:");
+      const pick = (col: string) => xs.map((x) => x.r[col]).find((v) => v !== null && v !== undefined) ?? null;
+      const latest: any = {};
+      for (const x of xs) for (const k of LATEST) if (x.r[k] && latest[k] === undefined) latest[k] = x.r[k];
+      const db = isNew ? null : dbById.get(target.slice(4));
+      // APN: keep what the database already has; otherwise take the first APN no other property holds
+      let apn = db?.apn || null;
+      if (!apn) for (const x of xs) { const k = apnK(x); if (k && (!apnUsed.has(k) || apnUsed.get(k) === target)) { apn = x.apn; apnUsed.set(k, target); break; } }
+      const rec: any = { market_fips: first.market || xs.find((x) => x.market)?.market || null, apn, address_key: db ? db.address_key : target.slice(4), address: pick("Address"), unit: pick("Unit #"),
+        city: pick("City"), state: pick("State"), zip: z5(pick("Zip")), county: pick("County"), property_type: pick("Property Type"), last_seen_at: NOW, latest };
+      if (db) rec.property_id = db.property_id;
+      const apns = Array.from(new Set(xs.map((x) => x.apn).filter(Boolean)));
+      props.push({ r: first.r, rows: xs, market: first.market, key: rec.address_key, rec, wasNew: isNew, pid: db?.property_id, apns });
+    });
+
     const ins = props.filter((x) => x.wasNew);
     const got = await upsert("properties", ins.map((x) => x.rec), { onConflict: "address_key", returning: true });
     const byKey = new Map(got.map((g: any) => [g.address_key, g.property_id]));
     for (const x of ins) x.pid = byKey.get(x.key);
     const upd = props.filter((x) => !x.wasNew);
     if (upd.length) await upsert("properties", upd.map((x) => x.rec), { onConflict: "property_id" });
-    for (const x of props) seen.set(fkOf(x), x.pid);
+    if (props.some((x) => !x.pid)) throw new Error("Some properties did not get an ID. Nothing was exported.");
 
+    // retry safety: if an earlier failed attempt of THIS pull already created a property, it still counts as new
+    const prior = await inChunks(props.map((x) => x.pid), 150, (part) => select("property_pulls", { pull_id: `eq.${pullId}`, property_id: `in.(${part.join(",")})`, select: "property_id,was_new" }));
+    const priorNew = new Set(prior.filter((p: any) => p.was_new).map((p: any) => p.property_id));
+    for (const x of props) if (priorNew.has(x.pid)) x.wasNew = true;
+
+    // source rows are kept: the first row as raw, every other row that merged into this property under _merged_rows
+    const rawOf = (r: any) => Object.fromEntries(Object.entries(r).filter(([, v]) => v !== null));
     await upsert("property_pulls", props.map((x) => ({ property_id: x.pid, pull_id: pullId, upload_id: upload.upload_id, was_new: x.wasNew,
-      raw: Object.fromEntries(Object.entries(x.r).filter(([, v]) => v !== null)) })), { onConflict: "property_id,pull_id" });
+      raw: { ...rawOf(x.r), ...(x.rows.length > 1 ? { _source_rows: x.rows.length, _apns: x.apns, _merged_rows: x.rows.slice(1).map((y: any) => rawOf(y.r)) } : {}) } })),
+      { onConflict: "property_id,pull_id" });
     // list lifespan: which of these properties were already on THIS list in an earlier pull
     const seenOnList = new Set<string>(); let lastListPull: any = null;
     if (profileId) {
-      for (const r of await inChunks(props.map((x) => x.pid), 150, (part) => select("property_profiles", { profile_id: `eq.${profileId}`, property_id: `in.(${part.join(",")})`, select: "property_id" }))) seenOnList.add(r.property_id);
+      for (const r of await inChunks(props.map((x) => x.pid), 150, (part) => select("property_profiles", { profile_id: `eq.${profileId}`, property_id: `in.(${part.join(",")})`, select: "property_id,first_pull_id" }))) if (r.first_pull_id !== pullId) seenOnList.add(r.property_id);
       lastListPull = (await select("pull_tasks", { profile_id: `eq.${profileId}`, zip_group: `eq.${pt.zip_group}`, status: "eq.processed", order: "completed_date.desc", select: "pull_id,completed_date" }))[0];
     }
     if (profileId) await upsert("property_profiles", props.map((x) => ({ property_id: x.pid, profile_id: profileId, first_pull_id: pullId })), { onConflict: "property_id,profile_id", ignore: true });
@@ -93,28 +136,28 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     // ---------- owners ----------
     const ownerKey = (r: any) => [clean(r["Owner 1 First Name"]), clean(r["Owner 1 Last Name"]), clean(r["Owner 2 First Name"]), clean(r["Owner 2 Last Name"]), clean(r["Mailing Address"]), z5(r["Mailing Zip"])].join("|");
     const okeys = new Map<string, any>();
-    for (const x of props) {
-      const r = x.r; x.okey = ownerKey(r);
-      okeys.set(x.okey, { owner_key: x.okey, owner1_first: r["Owner 1 First Name"], owner1_last: r["Owner 1 Last Name"], owner2_first: r["Owner 2 First Name"], owner2_last: r["Owner 2 Last Name"],
+    for (const x of props) for (const y of x.rows) {
+      const r = y.r; y.okey = ownerKey(r); if (y === x.rows[0]) x.okey = y.okey;
+      okeys.set(y.okey, { owner_key: y.okey, owner1_first: r["Owner 1 First Name"], owner1_last: r["Owner 1 Last Name"], owner2_first: r["Owner 2 First Name"], owner2_last: r["Owner 2 Last Name"],
         mailing_address: r["Mailing Address"], mailing_unit: r["Mailing Unit #"], mailing_city: r["Mailing City"], mailing_state: r["Mailing State"], mailing_zip: z5(r["Mailing Zip"]) });
     }
     await upsert("owners", Array.from(okeys.values()), { onConflict: "owner_key", ignore: true });
     const oid = new Map<string, string>();
     for (const o of await inChunks(Array.from(okeys.keys()), 40, (part) => select("owners", { owner_key: inList(part), select: "owner_id,owner_key" }))) oid.set(o.owner_key, o.owner_id);
-    await upsert("property_owners", props.map((x) => ({ property_id: x.pid, owner_id: oid.get(x.okey), first_pull_id: pullId, last_seen_at: NOW })), { onConflict: "property_id,owner_id" });
+    await upsert("property_owners", props.flatMap((x) => x.rows.map((y: any) => ({ property_id: x.pid, owner_id: oid.get(y.okey), first_pull_id: pullId, last_seen_at: NOW }))), { onConflict: "property_id,owner_id" });
 
     // ---------- phones ----------
     const items: any[] = [], excluded: any[] = [];
-    for (const x of props) {
-      const r = x.r; const lit = String(r["Litigator"] || "").toLowerCase() === "yes"; const here = new Set<string>();
+    for (const x of props) { const here = new Set<string>(); for (const y of x.rows) {
+      const r = y.r; const lit = x.rows.some((z: any) => String(z.r["Litigator"] || "").toLowerCase() === "yes");
       for (let s = 1; s <= 5; s++) {
         const raw = r[`Phone ${s}`]; if (!raw) continue;
-        const n = norm(raw); const base = { x, slot: s, raw, phone: n, type: r[`Phone ${s} Type`], dnc: !!r[`Phone ${s} DNC`], lit };
+        const n = norm(raw); const base = { x, okey: y.okey, slot: s, raw, phone: n, type: r[`Phone ${s} Type`], dnc: !!r[`Phone ${s} DNC`], lit };
         if (!n) { excluded.push({ ...base, reason: "invalid number" }); continue; }
         if (here.has(n)) continue;
         here.add(n); items.push(base);
       }
-    }
+    } }
     const allp = Array.from(new Set(items.map((i) => i.phone))) as string[];
     const ghl = new Map<string, string[]>(), hist = new Map<string, any[]>(), ghlMain = new Set<string>();
     for (const g of await inChunks(allp, 150, (part) => select("ghl_contact_phones", { phone: `in.(${part.join(",")})`, select: "phone,contact_id,field" }))) {
@@ -153,7 +196,7 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       fresh.push(i);
     }
 
-    await upsert("property_phones", items.map((i) => ({ property_id: i.x.pid, phone: i.phone, owner_id: oid.get(i.x.okey), slot: i.slot, phone_type: i.type, propstream_dnc: i.dnc, first_pull_id: pullId })),
+    await upsert("property_phones", items.map((i) => ({ property_id: i.x.pid, phone: i.phone, owner_id: oid.get(i.okey || i.x.okey), slot: i.slot, phone_type: i.type, propstream_dnc: i.dnc, first_pull_id: pullId })),
       { onConflict: "property_id,phone", ignore: true });
 
     const pidX = new Map(props.map((x) => [x.pid, x]));
