@@ -19,6 +19,20 @@ export async function select<T = any>(table: string, params: Record<string, stri
 export async function upsert<T = any>(table: string, rows: any[], opts: { onConflict?: string; ignore?: boolean; returning?: boolean; chunk?: number } = {}): Promise<T[]> {
   const res: T[] = [];
   if (!rows.length) return res;
+  // Safety net: Postgres refuses a batch that hits the same conflict key twice (error 21000).
+  // Collapse rows with the same key into one, keeping every non-empty value.
+  if (opts.onConflict) {
+    const cols = opts.onConflict.split(",").map((c) => c.trim());
+    const byKey = new Map<string, any>(), loose: any[] = [];
+    for (const r of rows) {
+      if (cols.some((c) => r[c] === null || r[c] === undefined)) { loose.push(r); continue; }  // NULL never conflicts
+      const k = JSON.stringify(cols.map((c) => r[c]));
+      const prev = byKey.get(k);
+      if (!prev) { byKey.set(k, { ...r }); continue; }
+      for (const [f, v] of Object.entries(r)) if (v !== null && v !== undefined && (prev[f] === null || prev[f] === undefined)) prev[f] = v;
+    }
+    rows = [...Array.from(byKey.values()), ...loose];
+  }
   const keys = Array.from(new Set(rows.flatMap((r) => Object.keys(r)))).sort();
   const norm = rows.map((r) => Object.fromEntries(keys.map((k) => [k, r[k] === undefined ? null : r[k]])));
   const chunk = opts.chunk ?? 500;
