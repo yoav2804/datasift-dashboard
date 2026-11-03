@@ -1,13 +1,14 @@
 import Nav from "../nav";
 import { select } from "@/lib/sb";
 import Uploader from "./uploader";
+import { marketShort } from "@/lib/lists";
 export const dynamic = "force-dynamic";
 export default async function Upload({ searchParams }: { searchParams: { pull?: string } }) {
   const [tasks, profiles, uploads] = await Promise.all([
     select("pull_tasks", { order: "planned_date.asc,pull_id.asc", status: "eq.planned" }), select("profiles", { select: "profile_id,rung,name" }),
     select("uploads", { order: "uploaded_at.desc", select: "upload_id,pull_id,filename,uploaded_at,row_count,report" })]);
   const prof = new Map(profiles.map((p: any) => [p.profile_id, p]));
-  const opts = tasks.map((t: any) => { const p: any = prof.get(t.profile_id) || {}; return { id: t.pull_id, label: `${t.planned_date} · ${t.market_fips === "29189" ? "County" : "City"} · ${p.name} · ${t.zip_group === "ALL" ? "all ZIPs" : "ZIP group " + t.zip_group}` }; });
+  const opts = tasks.map((t: any) => { const p: any = prof.get(t.profile_id) || {}; return { id: t.pull_id, label: `${t.planned_date} · ${marketShort(t.market_fips)} · ${p.name} · ${t.zip_group === "ALL" ? "all ZIPs" : "ZIP group " + t.zip_group}` }; });
   return (<>
     <Nav on="Upload" />
     <h1>Upload a pull</h1>
