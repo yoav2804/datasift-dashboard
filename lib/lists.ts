@@ -11,7 +11,7 @@ export const weekStart = (s: string) => addDays(s, -D(s).getUTCDay());   // week
 export const fmt = (s: string, o: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric" }) => D(s).toLocaleDateString("en-US", { ...o, timeZone: "UTC" });
 export const fmtLong = (s: string) => fmt(s, { month: "short", day: "numeric", year: "numeric" });
 export const ago = (s: string, t = today()) => { const n = daysBetween(s, t); return n <= 0 ? "today" : n === 1 ? "yesterday" : `${n} days ago`; };
-export const marketShort = (f: string) => (f === "29189" ? "County" : f === "29510" ? "City" : f);
+export const marketShort = (f: string) => (f === "29189" ? "County" : f === "29510" ? "City" : f === "29183" ? "St. Charles" : f);
 
 export type Pull = { date: string; pullId: string; file: string; rows: number; newProps: number | null; pctNewToList: number | null; importRows: number | null; files?: { results: string; import_csv: string } };
 export type ListInfo = {

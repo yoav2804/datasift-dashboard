@@ -4,7 +4,8 @@ import crypto from "crypto";
 import { select, upsert, update, putObject } from "./sb";
 import { norm } from "./phones";
 
-const COUNTY_FIPS: Record<string, string> = { "SAINT LOUIS CITY": "29510", "ST LOUIS CITY": "29510", "SAINT LOUIS": "29189", "ST LOUIS": "29189", "SAINT CHARLES": "29183", "ST CHARLES": "29183" };
+const COUNTY_FIPS: Record<string, string> = { "SAINT LOUIS CITY": "29510", "ST LOUIS CITY": "29510", "SAINT LOUIS": "29189", "ST LOUIS": "29189", "SAINT CHARLES": "29183", "ST CHARLES": "29183",
+  "SAINT LOUIS COUNTY": "29189", "ST LOUIS COUNTY": "29189", "SAINT CHARLES COUNTY": "29183", "ST CHARLES COUNTY": "29183" };
 const LATEST = ["Owner Occupied", "Property Status", "Bedrooms", "Total Bathrooms", "Building Sqft", "Effective Year Built", "Est. Value", "Est. Equity", "Est. Loan-to-Value", "Total Open Loans", "Lien Amount", "Foreclosure Factor", "MLS Status", "Last Sale Recording Date", "Last Sale Amount", "Total Condition"];
 const REQUIRED = ["Address", "Zip", "County", "APN", "Owner 1 First Name", "Owner 1 Last Name", "Mailing Address", "Phone 1", "Phone 1 Type"];
 
@@ -33,7 +34,8 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
   const missing = REQUIRED.filter((c) => !(c in RECS[0]));
   if (missing.length) throw new Error(`File is missing columns: ${missing.join(", ")}. Is this a PropStream export?`);
 
-  const marketOf = (r: any) => opts.market || COUNTY_FIPS[clean(r["County"])] || null;
+  let taskMarket: string | null = null;  // fallback: the market of the pull this file was uploaded for
+  const marketOf = (r: any) => opts.market || COUNTY_FIPS[clean(r["County"])] || taskMarket;
   const addrKey = (r: any) => `${clean(r["Address"])}|${clean(r["Unit #"])}|${z5(r["Zip"])}`;
 
   // pull task
@@ -43,6 +45,7 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     await upsert("pull_tasks", [{ pull_id: pullId, market_fips: mk, source_id: "PROPSTREAM", status: "pulled", notes: opts.notes || "created at upload" }]);
     pt = (await select("pull_tasks", { pull_id: `eq.${pullId}` }))[0];
   }
+  taskMarket = pt.market_fips || null;
   const profileId = pt.profile_id;
   const [upload] = await upsert("uploads", [{ pull_id: pullId, filename, file_sha256: sha, row_count: RECS.length }], { returning: true });
 
