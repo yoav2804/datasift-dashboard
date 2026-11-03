@@ -1,6 +1,7 @@
 import Nav from "../nav";
 import { select } from "@/lib/sb";
 import SyncButton from "./sync";
+import { marketShort } from "@/lib/lists";
 export const dynamic = "force-dynamic";
 
 const n = (v: any) => (v ?? 0).toLocaleString();
@@ -44,21 +45,21 @@ export default async function Tracker() {
     const p = prop.get(pid) || {}; const t: any = tk.get(pullId || firstPull.get(pid) || "") || {}; const pr: any = pf.get(t.profile_id);
     const m = mk.get(p.market_fips) || "Other";
     const z = zinfo.get(`${p.market_fips}|${p.zip}`);
-    return { m, l: pr ? `${pr.name} (${m === "St. Louis County" ? "County" : m === "St. Louis City" ? "City" : m})` : "Test / no list", z: `${p.zip || "?"} · ${m === "St. Louis County" ? "County" : "City"}${z ? ` · group ${z.zip_group}` : ""}` };
+    return { m, l: pr ? `${pr.name} (${marketShort(pr.market_fips)})` : "Test / no list", z: `${p.zip || "?"} · ${marketShort(p.market_fips)}${z ? ` · group ${z.zip_group}` : ""}` };
   };
   const get = (map: Map<string, Row>, k: string) => { if (!map.has(k)) map.set(k, blank()); return map.get(k)!; };
   for (const e of exported) { const k = keys(e.property_id); for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z)]) r.sent.add(e.property_id); }
   for (const o of outcomes) { if (!o.property_id || !STEPS.includes(o.event)) continue; const k = keys(o.property_id, o.pull_id);
     for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z)]) r.ev[o.event].add(o.property_id); }
   const sort = (m: Map<string, Row>) => Array.from(m.entries()).sort((a, b) => b[1].ev.contacted.size - a[1].ev.contacted.size || b[1].sent.size - a[1].sent.size);
-  const dsByList = new Map(profiles.map((p: any) => [`${p.name} (${p.market_fips === "29189" ? "County" : "City"})`, p.doors_per_deal]));
+  const dsByList = new Map(profiles.map((p: any) => [`${p.name} (${marketShort(p.market_fips)})`, p.doors_per_deal]));
   const t = all.ev.contacted.size, q = all.ev.qualified.size;
   const city = markets.find((m: any) => m.fips === "29510");
   // list lifespan: how much of each list is new every time we pull it again
   const life = new Map<string, any>();
   for (const b of batches as any[]) {
     const tsk: any = tk.get(b.pull_id); if (!tsk?.profile_id) continue; const pr: any = pf.get(tsk.profile_id);
-    const key = `${pr?.name} (${tsk.market_fips === "29189" ? "County" : "City"})${tsk.zip_group && tsk.zip_group !== "ALL" ? ` · ZIP group ${tsk.zip_group}` : ""}`;
+    const key = `${pr?.name} (${marketShort(tsk.market_fips)})${tsk.zip_group && tsk.zip_group !== "ALL" ? ` · ZIP group ${tsk.zip_group}` : ""}`;
     const L = life.get(key) || { pulls: 0, repulls: [] as number[], last: "", lastPct: null, profile: tsk.profile_id, group: tsk.zip_group };
     L.pulls++; L.last = (b.created_at || "").slice(0, 10); L.lastPct = b.counts?.pct_new_to_list ?? null;
     if (L.pulls > 1 && b.counts?.pct_new_to_list != null) L.repulls.push(b.counts.pct_new_to_list);
