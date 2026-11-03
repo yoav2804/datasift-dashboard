@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 const order = (L: ListInfo) => (L.state === "ready" ? 0 : L.state === "never" && L.daysLeft <= 0 ? 1 : L.state === "waiting" || L.state === "never" ? 2 : 3);
 
 export default async function ListLog({ searchParams }: { searchParams: { market?: string; show?: string } }) {
-  const market = ["29510", "29189"].includes(searchParams.market || "") ? searchParams.market! : "all";
+  const market = ["29510", "29189", "29183"].includes(searchParams.market || "") ? searchParams.market! : "all";
   const show = ["ready", "waiting", "never"].includes(searchParams.show || "") ? searchParams.show! : "all";
   const [{ lists, profiles }, markets, sources] = await Promise.all([loadLists(), select("markets", {}), select("sources", { kind: "eq.public_record", order: "source_id.asc" })]);
   const mk = new Map(markets.map((m: any) => [m.fips, m]));
@@ -32,7 +32,7 @@ export default async function ListLog({ searchParams }: { searchParams: { market
     </div>
     <div className="chips">
       <span className="muted">Market:</span>
-      {[["all", "Both"], ["29510", "City"], ["29189", "County"]].map(([v, l]) => <a key={v} href={q({ market: v })} className={`chip ${market === v ? "on" : ""}`}>{l}</a>)}
+      {[["all", "All"], ["29510", "City"], ["29189", "County"], ["29183", "St. Charles"]].map(([v, l]) => <a key={v} href={q({ market: v })} className={`chip ${market === v ? "on" : ""}`}>{l}</a>)}
       <span className="muted" style={{ marginLeft: 12 }}>Show:</span>
       {[["all", "All"], ["ready", "Ready now"], ["waiting", "Waiting"], ["never", "Never pulled"]].map(([v, l]) => <a key={v} href={q({ show: v })} className={`chip ${show === v ? "on" : ""}`}>{l}</a>)}
     </div>
