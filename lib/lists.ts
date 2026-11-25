@@ -22,8 +22,8 @@ export type ListInfo = {
 
 export async function loadLists() {
   const [tasks, profiles, uploads, markets] = await Promise.all([
-    select("pull_tasks", { order: "planned_date.asc,pull_id.asc" }), select("profiles", {}),
-    select("uploads", { order: "uploaded_at.desc", select: "upload_id,pull_id,filename,uploaded_at,row_count,report" }), select("markets", {})]);
+    select("pull_tasks", { order: "planned_date.asc,pull_id.asc", status: "neq.cancelled" }), select("profiles", {}),   // cancelled pulls (e.g. tests) never show
+    select("uploads", { order: "uploaded_at.desc", select: "upload_id,pull_id,filename,uploaded_at,row_count,report,status" }), select("markets", {})]);
   const prof = new Map<string, any>(profiles.map((p: any) => [p.profile_id, p]));
   const taskById = new Map<string, any>(tasks.map((t: any) => [t.pull_id, t]));
   const t0 = today();
@@ -37,9 +37,9 @@ export async function loadLists() {
     return lists.get(k)!;
   };
   for (const t of tasks) get(t);
-  // a pull counts once it was processed successfully
+  // a pull counts once its export was confirmed (drafts, voided and failed uploads don't)
   for (const u of uploads) {
-    if (!u.report?.files) continue;
+    if (!u.report?.files || u.status !== "confirmed") continue;
     const L = get(taskById.get(u.pull_id)); if (!L) continue;
     L.pulls.push({ date: dayOf(u.uploaded_at), pullId: u.pull_id, file: decodeURIComponent(String(u.filename || "").replace(/\+/g, " ")), rows: u.row_count,
       newProps: u.report.net_new_properties ?? null, pctNewToList: u.report.pct_new_to_list ?? null, importRows: u.report.import_rows ?? null, files: u.report.files });
@@ -47,7 +47,7 @@ export async function loadLists() {
   lists.forEach((L) => {
     L.pulls.sort((a, b) => b.date.localeCompare(a.date));
     L.last = L.pulls[0] || null;
-    L.next = tasks.find((t: any) => keyOf(t) === L.key && t.status === "planned") || null;
+    L.next = tasks.find((t: any) => keyOf(t) === L.key && (t.status === "planned" || t.status === "draft")) || null;
     L.nextDate = L.next?.planned_date || null;
     if (!L.nextDate) { L.state = "none"; L.stateText = "Not scheduled"; return; }
     L.daysLeft = daysBetween(t0, L.nextDate);

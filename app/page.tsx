@@ -19,8 +19,9 @@ export default async function Calendar({ searchParams }: { searchParams: { week?
   const rank = (a: any, b: any) => { const pa: any = prof.get(a.profile_id) || {}, pb: any = prof.get(b.profile_id) || {};
     return (a.planned_date || "").localeCompare(b.planned_date || "") || (pa.priority - pb.priority) || (pa.doors_per_deal - pb.doors_per_deal) || a.pull_id.localeCompare(b.pull_id); };
 
-  const toPull = tasks.filter((t: any) => t.status === "planned" && inWeek(t.planned_date)).sort(rank);
-  const overdue = isCurrent ? tasks.filter((t: any) => t.status === "planned" && t.planned_date && t.planned_date < ws).sort(rank) : [];
+  const open = (t: any) => t.status === "planned" || t.status === "draft";   // a draft is uploaded but not confirmed yet
+  const toPull = tasks.filter((t: any) => open(t) && inWeek(t.planned_date)).sort(rank);
+  const overdue = isCurrent ? tasks.filter((t: any) => open(t) && t.planned_date && t.planned_date < ws).sort(rank) : [];
   const skipped = tasks.filter((t: any) => t.status === "skipped" && inWeek(t.planned_date));
   const done: any[] = [];
   lists.forEach((L) => L.pulls.forEach((p) => { if (inWeek(p.date)) done.push({ L, p }); }));
@@ -37,11 +38,11 @@ export default async function Calendar({ searchParams }: { searchParams: { week?
       <div className="row"><div style={{ flex: 1, minWidth: 260 }}>
         <div style={{ fontWeight: 700, fontSize: 17 }}>{p.name}</div>
         <div style={{ marginTop: 4 }}><span className="tag ok">{m.name || t.market_fips}</span><span className={`tag p${p.priority}`}>Priority {p.priority}</span>
-          <span className="tag">{p.doors_per_deal} doors/deal</span>{late && <span className="tag warn">planned {fmt(t.planned_date)}, {daysBetween(t.planned_date, t0)} days late</span>}
+          <span className="tag">{p.doors_per_deal} doors/deal</span>{t.status === "draft" && <span className="tag warn">uploaded as draft: confirm or undo</span>}{late && <span className="tag warn">planned {fmt(t.planned_date)}, {daysBetween(t.planned_date, t0)} days late</span>}
           {isPast && !late && <span className="tag warn">not pulled</span>}</div>
         <div className="muted" style={{ marginTop: 6 }}>{zipText(t)}{estDoors(t) ? ` · about ${estDoors(t).toLocaleString()} new doors` : ""}</div>
         <div style={{ marginTop: 8 }}><LastPulled L={L} /></div>
-      </div><TaskActions pullId={t.pull_id} /></div>
+      </div><TaskActions pullId={t.pull_id} draft={t.status === "draft"} /></div>
       {p.caveats && <div style={{ marginTop: 8 }}><span className="tag warn">{p.caveats}</span></div>}
       <div className="filter"><b>PropStream filters</b> {p.filter_status === "approved" ? <span className="tag ok">approved</span> : <span className="tag warn">draft, not verified</span>}
         <div>{p.filter_definition?.text || "Not drafted yet"}</div></div>

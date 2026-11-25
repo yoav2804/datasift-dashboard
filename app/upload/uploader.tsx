@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import DraftActions from "./draftactions";
 const LABELS: [string, string][] = [["rows_in_file", "Rows in file"], ["net_new_properties", "New properties"], ["already_known_properties", "Already known"],
   ["import_rows", "GHL import rows"], ["import_rows_new", "New contacts"], ["import_rows_duplicates", "Duplicates (included)"], ["import_rows_may_create_second_contact", "May create 2nd contact"],
   ["already_in_ghl", "Numbers already in GHL"], ["multi_property_review", "Multi-property"],
@@ -29,16 +30,16 @@ export default function Uploader({ options, preset }: { options: { id: string; l
       {step && <div className="muted">{step}</div>}
       {err && <div className="err">{err}</div>}
       {rep && <div>
-        <h2 style={{ marginTop: 10 }}>Done</h2>
+        <h2 style={{ marginTop: 10 }}>Processed as a draft</h2>
+        <p className="sub" style={{ marginBottom: 12 }}>Under: <b>{options.find((o) => o.id === rep.pull_id)?.label || rep.pull_id}</b>. Nothing counts yet. Check it, then confirm the export, or undo if this went under the wrong list.</p>
+        {rep.warnings?.length > 0 && <div className="err" style={{ marginBottom: 12 }}><b>Check this before confirming:</b><ul style={{ margin: "6px 0 0", paddingLeft: 20 }}>{rep.warnings.map((w: string) => <li key={w}>{w}</li>)}</ul></div>}
         <div className="card" style={{ background: "var(--bg)" }}>
           <div><b>Duplicates:</b> {rep.already_known_properties} of {rep.unique_properties} properties ({rep.pct_already_known}%) were already in our database. {rep.import_rows_duplicates} of {rep.import_rows} CSV rows are duplicates.</div>
           {rep.refresh_note && <div style={{ marginTop: 6 }}><b>List freshness:</b> {rep.pct_new_to_list}% new to this list. {rep.refresh_note} {rep.next_pull_date && <>Next pull: <b>{rep.next_pull_date}</b>.</>}</div>}
         </div>
         <div className="grid">{LABELS.map(([k, l]) => <div className="stat" key={k}><div className="big">{rep[k] ?? 0}</div><div className="muted">{l}</div></div>)}</div>
-        <p style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <a className="btn primary" href={`/api/download?path=${encodeURIComponent(rep.files.import_csv)}`}>Download GHL import CSV</a>
-          <a className="btn" href={`/api/download?path=${encodeURIComponent(rep.files.results)}`}>Download all lists (Excel)</a>
-          {rep.multi_property_review > 0 && <a className="btn" href="/review">Review {rep.multi_property_review} cases</a>}</p>
+        <div style={{ marginTop: 16 }}><DraftActions uploadId={rep.upload_id} results={rep.files.results} warn={rep.warnings?.length > 0} /></div>
+        {rep.multi_property_review > 0 && <p><a href="/review">Review {rep.multi_property_review} multi-property cases</a></p>}
       </div>}
     </div></div>);
 }
