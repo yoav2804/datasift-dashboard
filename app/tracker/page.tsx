@@ -25,11 +25,12 @@ function Table({ title, rows, label, extra }: { title: string; rows: [string, Ro
 }
 
 export default async function Tracker() {
-  const [exported, batches, tasks, profiles, zips, markets, outcomes] = await Promise.all([
-    select("export_rows", { bucket: "eq.new", select: "property_id,batch_id" }), select("export_batches", { select: "batch_id,pull_id,counts,created_at", order: "created_at.asc" }),
+  let [exported, batches, tasks, profiles, zips, markets, outcomes] = await Promise.all([
+    select("export_rows", { bucket: "eq.new", select: "property_id,batch_id" }), select("export_batches", { approved: "eq.true", voided_at: "is.null", select: "batch_id,pull_id,counts,created_at", order: "created_at.asc" }),
     select("pull_tasks", { select: "pull_id,profile_id,market_fips,zip_group,status,planned_date" }), select("profiles", { select: "profile_id,name,market_fips,doors_per_deal" }),
     select("zip_priorities", { select: "market_fips,zip,zip_group,doors_per_deal" }), select("markets", {}), select("outcomes", { select: "property_id,pull_id,event" })]);
   const bPull = new Map(batches.map((b: any) => [b.batch_id, b.pull_id]));
+  exported = exported.filter((e: any) => bPull.has(e.batch_id));  // only confirmed, not voided exports count
   const tk = new Map(tasks.map((t: any) => [t.pull_id, t])); const pf = new Map(profiles.map((p: any) => [p.profile_id, p]));
   const mk = new Map(markets.map((m: any) => [m.fips, m.name]));
   const pids = Array.from(new Set([...exported.map((e: any) => e.property_id), ...outcomes.map((o: any) => o.property_id)].filter(Boolean)));

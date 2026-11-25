@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 const WHY: any = { in_ghl_other_property: "Already in GHL on a different property", shared_in_history: "Seen before on a different property", shared_in_batch: "Same number on 2+ properties in one file" };
 export default async function Review({ searchParams }: { searchParams: { show?: string } }) {
   const show = searchParams.show === "done" ? "done" : "open";
-  const cases = await select("review_cases", { status: show === "open" ? "eq.open" : "neq.open", order: "created_at.desc",
+  const cases = await select("review_cases", { status: show === "open" ? "eq.open" : "in.(new_opportunity,ignore)", order: "created_at.desc",
     select: "*,prop:properties!review_cases_new_property_id_fkey(address,city,zip)" });
   const ids = Array.from(new Set(cases.map((c: any) => c.ghl_contact_id).filter(Boolean)));
   const gc = new Map<string, any>();

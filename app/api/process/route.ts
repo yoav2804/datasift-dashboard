@@ -6,7 +6,7 @@ export async function POST(req: Request) {
   const { path, filename, pullId } = await req.json();
   try {
     const buf = await download("uploads", path);
-    const report = await processFile(buf, filename, pullId);
+    const report = await processFile(buf, filename, pullId, { storagePath: path });
     return NextResponse.json({ ok: true, report });
   } catch (e: any) { return NextResponse.json({ ok: false, error: e.message || String(e) }, { status: 400 }); }
 }

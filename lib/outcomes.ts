@@ -42,7 +42,7 @@ export async function syncOutcomes() {
 
   // attribution: contact -> property we exported (only if the contact was created after our export)
   const exported = await select("export_rows", { bucket: "eq.new", select: "phone,property_id,batch_id" });
-  const batches = new Map((await select("export_batches", { select: "batch_id,pull_id,created_at" })).map((b: any) => [b.batch_id, b]));
+  const batches = new Map((await select("export_batches", { approved: "eq.true", voided_at: "is.null", select: "batch_id,pull_id,created_at" })).map((b: any) => [b.batch_id, b]));
   const byPhone = new Map<string, any>();
   for (const e of exported) {
     const b: any = batches.get(e.batch_id); if (!b) continue;

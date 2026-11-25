@@ -1,11 +1,15 @@
 // Data Manager: process one PropStream export for one Pull ID. Writes to Supabase only, never to GHL.
+// The result is a DRAFT: nothing counts (list stats, recycling, Tracker) until it is confirmed in lib/uploads.ts.
+// A draft can be undone (voided); voided rows stay in the database but every page ignores them.
 import * as XLSX from "xlsx";
 import crypto from "crypto";
 import { select, upsert, update, putObject } from "./sb";
 import { norm } from "./phones";
+import { voidPullRows } from "./uploads";
 
 const COUNTY_FIPS: Record<string, string> = { "SAINT LOUIS CITY": "29510", "ST LOUIS CITY": "29510", "SAINT LOUIS": "29189", "ST LOUIS": "29189", "SAINT CHARLES": "29183", "ST CHARLES": "29183",
   "SAINT LOUIS COUNTY": "29189", "ST LOUIS COUNTY": "29189", "SAINT CHARLES COUNTY": "29183", "ST CHARLES COUNTY": "29183" };
+const MARKET_NAME: Record<string, string> = { "29510": "St. Louis City", "29189": "St. Louis County", "29183": "St. Charles County" };
 const LATEST = ["Owner Occupied", "Property Status", "Bedrooms", "Total Bathrooms", "Building Sqft", "Effective Year Built", "Est. Value", "Est. Equity", "Est. Loan-to-Value", "Total Open Loans", "Lien Amount", "Foreclosure Factor", "MLS Status", "Last Sale Recording Date", "Last Sale Amount", "Total Condition"];
 const REQUIRED = ["Address", "Zip", "County", "APN", "Owner 1 First Name", "Owner 1 Last Name", "Mailing Address", "Phone 1", "Phone 1 Type"];
 
@@ -21,7 +25,7 @@ async function inChunks<T>(vals: string[], size: number, fn: (part: string[]) =>
   return out;
 }
 
-export async function processFile(buf: ArrayBuffer, filename: string, pullId: string, opts: { market?: string; notes?: string } = {}) {
+export async function processFile(buf: ArrayBuffer, filename: string, pullId: string, opts: { market?: string; notes?: string; storagePath?: string } = {}) {
   const NOW = new Date().toISOString();
   const sha = crypto.createHash("sha256").update(Buffer.from(buf)).digest("hex");
   if ((await select("uploads", { file_sha256: `eq.${sha}`, select: "upload_id" })).length) throw new Error("This exact file was already uploaded. Nothing was done.");
@@ -45,9 +49,13 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     await upsert("pull_tasks", [{ pull_id: pullId, market_fips: mk, source_id: "PROPSTREAM", status: "pulled", notes: opts.notes || "created at upload" }]);
     pt = (await select("pull_tasks", { pull_id: `eq.${pullId}` }))[0];
   }
+  if (pt.status === "draft") throw new Error("This pull already has a draft waiting. Confirm or undo it on the Upload page first.");
+  if (pt.status === "processed") throw new Error("This pull was already processed and exported. Pick another pull.");
   taskMarket = pt.market_fips || null;
   const profileId = pt.profile_id;
-  const [upload] = await upsert("uploads", [{ pull_id: pullId, filename, file_sha256: sha, row_count: RECS.length }], { returning: true });
+  const prevStatus = pt.status;
+  const [upload] = await upsert("uploads", [{ pull_id: pullId, filename, file_sha256: sha, row_count: RECS.length, status: "draft", storage_path: opts.storagePath || null }], { returning: true });
+  await update("pull_tasks", { pull_id: `eq.${pullId}` }, { status: "draft" });
 
   try {
     // ---------- properties ----------
@@ -122,19 +130,31 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     const prior = await inChunks(props.map((x) => x.pid), 150, (part) => select("property_pulls", { pull_id: `eq.${pullId}`, property_id: `in.(${part.join(",")})`, select: "property_id,was_new" }));
     const priorNew = new Set(prior.filter((p: any) => p.was_new).map((p: any) => p.property_id));
     for (const x of props) if (priorNew.has(x.pid)) x.wasNew = true;
+    // a property whose only earlier pulls were voided (undone or failed) is still new to us
+    const known = props.filter((x) => !x.wasNew);
+    const validElsewhere = new Set<string>();
+    for (const r of await inChunks(known.map((x) => x.pid), 150, (part) => select("property_pulls", { property_id: `in.(${part.join(",")})`, pull_id: `neq.${pullId}`, voided_at: "is.null", select: "property_id" })))
+      validElsewhere.add(r.property_id);
+    for (const x of known) if (!validElsewhere.has(x.pid)) x.wasNew = true;
 
     // source rows are kept: the first row as raw, every other row that merged into this property under _merged_rows
     const rawOf = (r: any) => Object.fromEntries(Object.entries(r).filter(([, v]) => v !== null));
-    await upsert("property_pulls", props.map((x) => ({ property_id: x.pid, pull_id: pullId, upload_id: upload.upload_id, was_new: x.wasNew,
+    await upsert("property_pulls", props.map((x) => ({ property_id: x.pid, pull_id: pullId, upload_id: upload.upload_id, was_new: x.wasNew, voided_at: null,
       raw: { ...rawOf(x.r), ...(x.rows.length > 1 ? { _source_rows: x.rows.length, _apns: x.apns, _merged_rows: x.rows.slice(1).map((y: any) => rawOf(y.r)) } : {}) } })),
       { onConflict: "property_id,pull_id" });
     // list lifespan: which of these properties were already on THIS list in an earlier pull
     const seenOnList = new Set<string>(); let lastListPull: any = null;
     if (profileId) {
-      for (const r of await inChunks(props.map((x) => x.pid), 150, (part) => select("property_profiles", { profile_id: `eq.${profileId}`, property_id: `in.(${part.join(",")})`, select: "property_id,first_pull_id" }))) if (r.first_pull_id !== pullId) seenOnList.add(r.property_id);
+      for (const r of await inChunks(props.map((x) => x.pid), 150, (part) => select("property_profiles", { profile_id: `eq.${profileId}`, property_id: `in.(${part.join(",")})`, voided_at: "is.null", select: "property_id,first_pull_id" }))) if (r.first_pull_id !== pullId) seenOnList.add(r.property_id);
       lastListPull = (await select("pull_tasks", { profile_id: `eq.${profileId}`, zip_group: `eq.${pt.zip_group}`, status: "eq.processed", order: "completed_date.desc", select: "pull_id,completed_date" }))[0];
     }
-    if (profileId) await upsert("property_profiles", props.map((x) => ({ property_id: x.pid, profile_id: profileId, first_pull_id: pullId })), { onConflict: "property_id,profile_id", ignore: true });
+    if (profileId) {
+      // a link left by a voided run is taken over by this pull
+      const pids = props.map((x) => x.pid);
+      for (let i = 0; i < pids.length; i += 150)
+        await update("property_profiles", { profile_id: `eq.${profileId}`, property_id: `in.(${pids.slice(i, i + 150).join(",")})`, voided_at: "not.is.null" }, { voided_at: null, first_pull_id: pullId, first_matched_at: NOW });
+      await upsert("property_profiles", props.map((x) => ({ property_id: x.pid, profile_id: profileId, first_pull_id: pullId })), { onConflict: "property_id,profile_id", ignore: true });
+    }
 
     // ---------- owners ----------
     const ownerKey = (r: any) => [clean(r["Owner 1 First Name"]), clean(r["Owner 1 Last Name"]), clean(r["Owner 2 First Name"]), clean(r["Owner 2 Last Name"]), clean(r["Mailing Address"]), z5(r["Mailing Zip"])].join("|");
@@ -167,7 +187,7 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       ghl.set(g.phone, [...(ghl.get(g.phone) || []), g.contact_id]);
       if (g.field === "phone") ghlMain.add(g.phone);   // GHL only matches duplicates on the main Phone field
     }
-    for (const h of await inChunks(allp, 150, (part) => select("property_phones", { phone: `in.(${part.join(",")})`, select: "phone,property_id,first_pull_id" })))
+    for (const h of await inChunks(allp, 150, (part) => select("property_phones", { phone: `in.(${part.join(",")})`, voided_at: "is.null", select: "phone,property_id,first_pull_id" })))
       hist.set(h.phone, [...(hist.get(h.phone) || []), h]);
     const cids = Array.from(new Set(Array.from(ghl.values()).flat()));
     const gc = new Map<string, any>();
@@ -199,8 +219,14 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       fresh.push(i);
     }
 
-    await upsert("property_phones", items.map((i) => ({ property_id: i.x.pid, phone: i.phone, owner_id: oid.get(i.okey || i.x.okey), slot: i.slot, phone_type: i.type, propstream_dnc: i.dnc, first_pull_id: pullId })),
-      { onConflict: "property_id,phone", ignore: true });
+    // property-phone links: new ones are inserted; a link left by a voided run is taken over by this pull
+    const voidedLinks = new Set<string>();
+    for (const r of await inChunks(Array.from(new Set(items.map((i) => i.x.pid))) as string[], 150, (part) => select("property_phones", { property_id: `in.(${part.join(",")})`, voided_at: "not.is.null", select: "property_id,phone" })))
+      voidedLinks.add(`${r.property_id}|${r.phone}`);
+    const linkRow = (i: any) => ({ property_id: i.x.pid, phone: i.phone, owner_id: oid.get(i.okey || i.x.okey), slot: i.slot, phone_type: i.type, propstream_dnc: i.dnc, first_pull_id: pullId, voided_at: null });
+    const isVoidedLink = (i: any) => voidedLinks.has(`${i.x.pid}|${i.phone}`);
+    await upsert("property_phones", items.filter(isVoidedLink).map(linkRow), { onConflict: "property_id,phone" });
+    await upsert("property_phones", items.filter((i) => !isVoidedLink(i)).map(linkRow), { onConflict: "property_id,phone", ignore: true });
 
     const pidX = new Map(props.map((x) => [x.pid, x]));
     const histAddr = new Map<string, string>();
@@ -220,9 +246,16 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
         i.mailMatch = o ? clean(a["Mailing Address"]) === clean(o.r["Mailing Address"]) : null; i.otherAddr = o?.r["Address"] || "";
       }
     }
-    await upsert("review_cases", review.map((i) => ({ phone: i.phone, reason: i.reason, ghl_contact_id: i.ghl?.contact_id || null, new_property_id: i.x.pid,
+    // review cases: new ones are inserted; a case left by a voided run is reopened for this pull
+    const voidedCases = new Set<string>();
+    for (const r of await inChunks(Array.from(new Set(review.map((i) => i.x.pid))) as string[], 150, (part) => select("review_cases", { new_property_id: `in.(${part.join(",")})`, status: "eq.voided", select: "phone,new_property_id" })))
+      voidedCases.add(`${r.phone}|${r.new_property_id}`);
+    const caseRow = (i: any) => ({ phone: i.phone, reason: i.reason, ghl_contact_id: i.ghl?.contact_id || null, new_property_id: i.x.pid,
       owner_name_match: i.nameMatch, mailing_match: i.mailMatch, pull_id: pullId, original_property_id: i.other?.[0]?.property_id || null,
-      notes: i.otherAddr ? `Other property: ${i.otherAddr}` : null })), { onConflict: "phone,new_property_id", ignore: true });
+      notes: i.otherAddr ? `Other property: ${i.otherAddr}` : null });
+    const isVoidedCase = (i: any) => voidedCases.has(`${i.phone}|${i.x.pid}`);
+    await upsert("review_cases", review.filter(isVoidedCase).map((i) => ({ ...caseRow(i), status: "open", decided_at: null })), { onConflict: "phone,new_property_id" });
+    await upsert("review_cases", review.filter((i) => !isVoidedCase(i)).map(caseRow), { onConflict: "phone,new_property_id", ignore: true });
 
     // ---------- outputs ----------
     const base = (i: any) => { const r = i.x.r; return { "Property ID": i.x.pid, Address: r["Address"], City: r["City"], Zip: z5(r["Zip"]),
@@ -276,7 +309,21 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
 
     const zipDist: Record<string, number> = {};
     for (const x of props) { const z = z5(x.r["Zip"]); zipDist[z] = (zipDist[z] || 0) + 1; }
-    const report: any = { pull_id: pullId, file: filename, rows_in_file: RECS.length, duplicate_rows_in_file: dupInFile, unique_properties: props.length,
+
+    // sanity checks: does this file belong to the pull it was uploaded under?
+    const warnings: string[] = [];
+    if (pt.market_fips) {
+      const off = new Map<string, number>(); let unknown = 0;
+      for (const r of RECS) { const m = COUNTY_FIPS[clean(r["County"])]; if (!m) unknown++; else if (m !== pt.market_fips) off.set(m, (off.get(m) || 0) + 1); }
+      off.forEach((n, m) => warnings.push(`${n} of ${RECS.length} rows are in ${MARKET_NAME[m] || m}, but this pull is for ${MARKET_NAME[pt.market_fips] || pt.market_fips}.`));
+      if (unknown) warnings.push(`${unknown} of ${RECS.length} rows have a county outside our 3 markets or no county.`);
+    }
+    if (pt.zips?.length) {
+      const allowed = new Set((pt.zips as string[]).map(z5));
+      const outside = props.filter((x) => !allowed.has(z5(x.r["Zip"]))).length;
+      if (outside) warnings.push(`${outside} of ${props.length} properties are outside this pull's ZIP group (${pt.zip_group}).`);
+    }
+    const report: any = { upload_id: upload.upload_id, warnings, pull_id: pullId, file: filename, rows_in_file: RECS.length, duplicate_rows_in_file: dupInFile, unique_properties: props.length,
       net_new_properties: props.filter((x) => x.wasNew).length, already_known_properties: props.filter((x) => !x.wasNew).length,
       non_residential_properties: props.filter((x) => !isResidential(x.r["Property Type"])).length,
       properties_with_any_phone: new Set(items.map((i) => i.x.pid)).size, unique_valid_phones: allp.length, property_phone_pairs: items.length,
@@ -301,7 +348,7 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     await putObject("outputs", cPath, csv, "text/csv");
     report.files = { results: xPath, import_csv: cPath };
 
-    const [batch] = await upsert("export_batches", [{ pull_id: pullId, counts: report }], { returning: true });
+    const [batch] = await upsert("export_batches", [{ pull_id: pullId, upload_id: upload.upload_id, approved: false, counts: report }], { returning: true });
     await upsert("export_rows", [
       ...fresh.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "new", reason: null })),
       ...existingL.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "existing", reason: i.ghl?.contact_id || `prior pull ${i.priorPull}` })),
@@ -309,19 +356,15 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       ...held.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "held", reason: i.reason })),
       ...excluded.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone || i.raw, bucket: "excluded", reason: i.reason })),
     ]);
+    // stays a draft: the pull is marked done and the next pull is scheduled only when the export is confirmed (lib/uploads.ts)
     await update("uploads", { upload_id: `eq.${upload.upload_id}` }, { report });
-    await update("pull_tasks", { pull_id: `eq.${pullId}` }, { status: "processed", completed_date: NOW.slice(0, 10), rows_pulled: RECS.length,
-      net_new_properties: report.net_new_properties, contacts_generated: outImp.length,
-      next_pull_date: profileId ? nextDate : null });
-    if (profileId) await upsert("pull_tasks", [{ pull_id: `${pullId.replace(/-\d{8}$/, "")}-${nextDate.replace(/-/g, "")}`, market_fips: pt.market_fips, profile_id: profileId,
-      zip_group: pt.zip_group, zips: pt.zips, source_id: pt.source_id, priority: pt.priority, planned_date: nextDate, status: "planned", notes: `recycle: ${refreshNote}` }],
-      { onConflict: "pull_id", ignore: true });
     return report;
   } catch (e) {
-    // let the same file be retried after a failure
-    await fetch(`${process.env.SUPABASE_URL}/rest/v1/uploads?upload_id=eq.${upload.upload_id}`, { method: "PATCH",
-      headers: { apikey: process.env.SUPABASE_SERVICE_KEY!, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ file_sha256: null, report: { error: String(e) } }) });
+    // a failed run must not count anywhere: void what it wrote, put the pull back, and let the same file be retried
+    await voidPullRows(pullId, new Date().toISOString()).catch(() => {});
+    await update("export_batches", { upload_id: `eq.${upload.upload_id}` }, { voided_at: new Date().toISOString() }).catch(() => {});
+    await update("pull_tasks", { pull_id: `eq.${pullId}` }, { status: prevStatus }).catch(() => {});
+    await update("uploads", { upload_id: `eq.${upload.upload_id}` }, { file_sha256: null, status: "failed", report: { error: String(e) } }).catch(() => {});
     throw e;
   }
 }
