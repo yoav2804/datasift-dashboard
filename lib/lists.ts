@@ -22,7 +22,7 @@ export type ListInfo = {
 
 export async function loadLists() {
   const [tasks, profiles, uploads, markets] = await Promise.all([
-    select("pull_tasks", { order: "planned_date.asc,pull_id.asc" }), select("profiles", {}),
+    select("pull_tasks", { order: "planned_date.asc,pull_id.asc", status: "neq.cancelled" }), select("profiles", {}),   // cancelled pulls (e.g. tests) never show
     select("uploads", { order: "uploaded_at.desc", select: "upload_id,pull_id,filename,uploaded_at,row_count,report,status" }), select("markets", {})]);
   const prof = new Map<string, any>(profiles.map((p: any) => [p.profile_id, p]));
   const taskById = new Map<string, any>(tasks.map((t: any) => [t.pull_id, t]));
