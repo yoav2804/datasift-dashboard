@@ -12,7 +12,7 @@ export async function syncMessages(budgetMs = 240_000) {
   const startDate = last ? new Date(Date.parse(last) - 864e5).toISOString() : "2024-01-01T00:00:00.000Z";
   let cursor: string | undefined, pages = 0, saved = 0, done = false;
   while (Date.now() - t0 < budgetMs) {
-    const d = await ghlGet("conversations/messages/export", { locationId: loc, channel: "SMS", limit: 100, sortBy: "dateAdded", sortOrder: "asc", startDate, cursor });
+    const d = await ghlGet("conversations/messages/export", { locationId: loc, channel: "SMS", limit: 100, sortBy: "createdAt", sortOrder: "asc", startDate, cursor });
     const ms = d.messages || []; pages++;
     const rows = ms.map((m: any) => {
       const out = m.direction === "outbound";
