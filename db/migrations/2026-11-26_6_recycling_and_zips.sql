@@ -40,9 +40,10 @@ create or replace view property_first_outreach with (security_invoker = on) as
   from export_rows r join message_events m on m.phone = r.phone and m.direction = 'outbound' and m.sent_at >= r.imported_at
   where r.bucket = 'new' and r.imported_at is not null group by 1;
 create or replace view zip_daily with (security_invoker = on) as
-  select p.zip, p.market_fips, (u.uploaded_at at time zone 'America/Chicago')::date as day, 'pulled' as kind, count(distinct pp.property_id) as n
-  from property_pulls pp join uploads u on u.pull_id = pp.pull_id and u.status = 'confirmed' join properties p on p.property_id = pp.property_id
-  where pp.voided_at is null group by 1, 2, 3
+  -- pulled: from each confirmed upload's ZIP breakdown (fast); messaged: from platform message records
+  select left(z.key, 5) as zip, t.market_fips, (u.uploaded_at at time zone 'America/Chicago')::date as day, 'pulled' as kind, sum(z.value::int) as n
+  from uploads u join pull_tasks t on t.pull_id = u.pull_id cross join lateral jsonb_each_text(coalesce(u.report->'zip_distribution', '{}')) z
+  where u.status = 'confirmed' group by 1, 2, 3
   union all
   select p.zip, p.market_fips, (o.first_at at time zone 'America/Chicago')::date, 'messaged', count(*)
   from property_first_outreach o join properties p on p.property_id = o.property_id group by 1, 2, 3;

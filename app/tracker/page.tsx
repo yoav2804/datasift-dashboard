@@ -8,6 +8,7 @@ import { loadRecycling } from "@/lib/recycling";
 import type { By } from "@/lib/lifecycle";
 import { marketShort } from "@/lib/lists";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const n = (v: any) => (v ?? 0).toLocaleString();
 const STEPS = ["contacted", "replied", "interested", "qualified", "wrong_number", "opt_out", "contract", "closed"];
@@ -49,7 +50,10 @@ export default async function Tracker({ searchParams }: { searchParams: { by?: s
   const mk = new Map(markets.map((m: any) => [m.fips, m.name]));
   const pids = Array.from(new Set([...exported.map((e: any) => e.property_id), ...outcomes.map((o: any) => o.property_id)].filter(Boolean)));
   const prop = new Map<string, any>();
-  for (let i = 0; i < pids.length; i += 150) for (const p of await select("properties", { property_id: `in.(${pids.slice(i, i + 150).join(",")})`, select: "property_id,zip,market_fips" })) prop.set(p.property_id, p);
+  const parts: string[][] = []; for (let i = 0; i < pids.length; i += 150) parts.push(pids.slice(i, i + 150) as string[]);
+  for (let i = 0; i < parts.length; i += 12)   // 12 lookups at a time instead of one by one
+    for (const rows of await Promise.all(parts.slice(i, i + 12).map((part) => select("properties", { property_id: `in.(${part.join(",")})`, select: "property_id,zip,market_fips" }))))
+      for (const p of rows) prop.set(p.property_id, p);
   const zinfo = new Map(zips.map((z: any) => [`${z.market_fips}|${z.zip}`, z]));
 
   // primary attribution: the first pull that exported the property
