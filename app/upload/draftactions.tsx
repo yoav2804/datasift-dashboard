@@ -29,12 +29,12 @@ export default function DraftActions({ uploadId, results, warn }: { uploadId: st
 }
 
 // Process a voided upload's stored file again, under another pull.
-export function Reprocess({ path, filename, options }: { path: string; filename: string; options: { id: string; label: string }[] }) {
+export function Reprocess({ path, filename, options, skipTrace, sourceId }: { path: string; filename: string; options: { id: string; label: string }[]; skipTrace?: string; sourceId?: string }) {
   const [pull, setPull] = useState(""); const [busy, setBusy] = useState(""); const [err, setErr] = useState("");
   async function go() {
     setBusy("Processing… (up to a few minutes for big files)"); setErr("");
     try {
-      const r = await (await fetch("/api/process", { method: "POST", body: JSON.stringify({ path, filename, pullId: pull }) })).json();
+      const r = await (await fetch("/api/process", { method: "POST", body: JSON.stringify({ path, filename, pullId: pull, skipTrace, sourceId }) })).json();
       if (!r.ok) throw new Error(r.error);
       location.href = "/upload#drafts"; location.reload();
     } catch (e: any) { setErr(e.message); setBusy(""); }

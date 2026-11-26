@@ -25,10 +25,15 @@ function Table({ title, rows, label, extra }: { title: string; rows: [string, Ro
 }
 
 export default async function Tracker() {
-  let [exported, batches, tasks, profiles, zips, markets, outcomes] = await Promise.all([
+  let [exported, batches, tasks, profiles, zips, markets, outcomes, ups, sources] = await Promise.all([
     select("export_rows", { bucket: "eq.new", select: "property_id,batch_id" }), select("export_batches", { approved: "eq.true", voided_at: "is.null", select: "batch_id,pull_id,counts,created_at", order: "created_at.asc" }),
     select("pull_tasks", { select: "pull_id,profile_id,market_fips,zip_group,status,planned_date" }), select("profiles", { select: "profile_id,name,market_fips,doors_per_deal" }),
-    select("zip_priorities", { select: "market_fips,zip,zip_group,doors_per_deal" }), select("markets", {}), select("outcomes", { select: "property_id,pull_id,event" })]);
+    select("zip_priorities", { select: "market_fips,zip,zip_group,doors_per_deal" }), select("markets", {}), select("outcomes", { select: "property_id,pull_id,event" }),
+    select("uploads", { status: "eq.confirmed", select: "pull_id,skip_trace_provider,original_source_id,report" }), select("sources", { select: "source_id,name" })]);
+  // where each pull came from and who skip traced it
+  const srcName = new Map(sources.map((s: any) => [s.source_id, s.name]));
+  const pullProv = new Map(ups.map((u: any) => [u.pull_id, u.skip_trace_provider || "Unknown"]));
+  const pullSrc = new Map(ups.map((u: any) => [u.pull_id, srcName.get(u.original_source_id) || u.original_source_id || "Unknown"]));
   const bPull = new Map(batches.map((b: any) => [b.batch_id, b.pull_id]));
   exported = exported.filter((e: any) => bPull.has(e.batch_id));  // only confirmed, not voided exports count
   const tk = new Map(tasks.map((t: any) => [t.pull_id, t])); const pf = new Map(profiles.map((p: any) => [p.profile_id, p]));
@@ -41,17 +46,24 @@ export default async function Tracker() {
   // primary attribution: the first pull that exported the property
   const firstPull = new Map<string, string>();
   for (const e of exported) { const pl = bPull.get(e.batch_id); if (pl && !firstPull.has(e.property_id)) firstPull.set(e.property_id, pl as string); }
-  const all = blank(), byM = new Map<string, Row>(), byL = new Map<string, Row>(), byZ = new Map<string, Row>();
+  const all = blank(), byM = new Map<string, Row>(), byL = new Map<string, Row>(), byZ = new Map<string, Row>(), byP = new Map<string, Row>(), byS = new Map<string, Row>();
   const keys = (pid: string, pullId?: string) => {
-    const p = prop.get(pid) || {}; const t: any = tk.get(pullId || firstPull.get(pid) || "") || {}; const pr: any = pf.get(t.profile_id);
+    const pl = pullId || firstPull.get(pid) || "";
+    const p = prop.get(pid) || {}; const t: any = tk.get(pl) || {}; const pr: any = pf.get(t.profile_id);
     const m = mk.get(p.market_fips) || "Other";
     const z = zinfo.get(`${p.market_fips}|${p.zip}`);
-    return { m, l: pr ? `${pr.name} (${marketShort(pr.market_fips)})` : "Test / no list", z: `${p.zip || "?"} · ${marketShort(p.market_fips)}${z ? ` · group ${z.zip_group}` : ""}` };
+    return { m, sp: (pullProv.get(pl) as string) || "Unknown", so: (pullSrc.get(pl) as string) || "Unknown", l: pr ? `${pr.name} (${marketShort(pr.market_fips)})` : "Test / no list", z: `${p.zip || "?"} · ${marketShort(p.market_fips)}${z ? ` · group ${z.zip_group}` : ""}` };
   };
   const get = (map: Map<string, Row>, k: string) => { if (!map.has(k)) map.set(k, blank()); return map.get(k)!; };
-  for (const e of exported) { const k = keys(e.property_id); for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z)]) r.sent.add(e.property_id); }
+  for (const e of exported) { const k = keys(e.property_id); for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z), get(byP, k.sp), get(byS, k.so)]) r.sent.add(e.property_id); }
   for (const o of outcomes) { if (!o.property_id || !STEPS.includes(o.event)) continue; const k = keys(o.property_id, o.pull_id);
-    for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z)]) r.ev[o.event].add(o.property_id); }
+    for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z), get(byP, k.sp), get(byS, k.so)]) r.ev[o.event].add(o.property_id); }
+  // skip trace coverage per provider, from the upload reports
+  const cov = new Map<string, any>();
+  for (const u of ups as any[]) { const r = u.report || {}; const k = u.skip_trace_provider || "Unknown";
+    const c = cov.get(k) || { uploads: 0, props: 0, withPhone: 0, pairs: 0, phones: 0, landlines: 0, invalid: 0 };
+    c.uploads++; c.props += r.unique_properties || 0; c.withPhone += r.properties_with_any_phone || 0; c.pairs += r.property_phone_pairs || 0;
+    c.phones += r.unique_valid_phones || 0; c.landlines += r.landlines || 0; c.invalid += r.invalid_numbers || 0; cov.set(k, c); }
   const sort = (m: Map<string, Row>) => Array.from(m.entries()).sort((a, b) => b[1].ev.contacted.size - a[1].ev.contacted.size || b[1].sent.size - a[1].sent.size);
   const dsByList = new Map(profiles.map((p: any) => [`${p.name} (${marketShort(p.market_fips)})`, p.doors_per_deal]));
   const t = all.ev.contacted.size, q = all.ev.qualified.size;
@@ -86,6 +98,15 @@ export default async function Tracker() {
       <div className="stat"><div className="big">{n(all.ev.wrong_number.size)}</div><div className="muted">doors with a wrong number</div></div>
       <div className="stat"><div className="big">{pct(all.ev.wrong_number.size, t)}</div><div className="muted">wrong number rate (of texted doors)</div></div>
     </div>
+    <h2>By skip trace provider</h2>
+    <p className="sub">Who found the phone numbers. Coverage comes from the uploaded files; wrong numbers and replies come from GHL.</p>
+    <div className="tablewrap"><table><thead><tr><th>Provider</th><th>Uploads</th><th>Properties</th><th>% with a valid phone</th><th>Phones per property</th><th>Landline % of phones</th><th>Invalid numbers</th><th>Texted</th><th>Reply rate</th><th>Wrong # % of texted</th><th>Leads</th></tr></thead><tbody>
+      {Array.from(cov.entries()).map(([k, c]) => { const r = byP.get(k) || blank(); const tx = r.ev.contacted.size;
+        return <tr key={k}><td><b>{k}</b>{tx > 0 && tx < 300 && <span className="tag warn" style={{ marginLeft: 6 }}>small sample</span>}</td><td>{c.uploads}</td><td>{n(c.props)}</td><td>{pct(c.withPhone, c.props)}</td>
+          <td>{c.props ? (c.pairs / c.props).toFixed(2) : "–"}</td><td>{pct(c.landlines, c.pairs)}</td><td>{n(c.invalid)}</td>
+          <td>{n(tx)}</td><td>{pct(r.ev.replied.size, tx)}</td><td><b>{pct(r.ev.wrong_number.size, tx)}</b></td><td>{n(r.ev.qualified.size)}</td></tr>; })}
+      {!cov.size && <tr><td colSpan={11} className="muted">Shows up after the first confirmed upload.</td></tr>}
+    </tbody></table></div>
     <p className="muted" style={{ marginTop: 8 }}>Counted from the Wrong Number stage and the "wrong number" tag. A number that never replies is unknown, so the real wrong rate is likely higher than shown.</p>
     <div className="card" style={{ marginTop: 16 }}><div className="row"><div>
       <div><b>Contracts and closed deals</b> happen in TJ Capital, so they show once that account is connected (read only).</div>
@@ -99,6 +120,7 @@ export default async function Tracker() {
       {!life.size && <tr><td colSpan={6} className="muted">Shows up after the first pull from the calendar.</td></tr>}
     </tbody></table></div>
     <Table title="By market" rows={sort(byM)} label="Market" />
+    <Table title="By original source" rows={sort(byS)} label="Where the list came from" />
     <Table title="By list" rows={sort(byL)} label="List" extra={(k) => dsByList.get(k) ?? ""} />
     <Table title="By ZIP" rows={sort(byZ)} label="ZIP" />
   </>);
