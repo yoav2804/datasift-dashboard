@@ -12,7 +12,9 @@ import { loadLists, addDays, today, weekStart, daysBetween, marketShort } from "
 
 export type Settings = { daily_capacity: number; working_days: number };
 export const DEFAULT_SETTINGS: Settings = { daily_capacity: 1000, working_days: 6 };
-const DEFAULT_REFRESH = 0.25;   // share of a list assumed new on a re-pull when we have no measurement yet
+const DEFAULT_REFRESH = 0.25;
+// properties that went to outreach with only new numbers. Older uploads also exported duplicates, so use their "new" count.
+const exported = (r: any) => (r?.unique_phone_numbers != null ? r.import_rows : r?.import_rows_new ?? r?.import_rows) || 0;   // share of a list assumed new on a re-pull when we have no measurement yet
 
 export async function getSettings(): Promise<Settings> {
   const rows = await select("app_settings", { key: "eq.planner" }).catch(() => []);
@@ -35,7 +37,7 @@ export async function computePlan(weekOf?: string) {
   const yieldBy = new Map<string, { rows: number; exp: number }>();
   for (const u of uploads as any[]) {
     if (u.status !== "confirmed" || !u.report?.files) continue; const t: any = taskOf.get(u.pull_id); if (!t) continue;
-    const y = yieldBy.get(t.market_fips) || { rows: 0, exp: 0 }; y.rows += u.report.rows_in_file || 0; y.exp += u.report.import_rows || 0; yieldBy.set(t.market_fips, y);
+    const y = yieldBy.get(t.market_fips) || { rows: 0, exp: 0 }; y.rows += u.report.rows_in_file || 0; y.exp += exported(u.report); yieldBy.set(t.market_fips, y);
   }
   const allY = Array.from(yieldBy.values()).reduce((a, y) => ({ rows: a.rows + y.rows, exp: a.exp + y.exp }), { rows: 0, exp: 0 });
   const marketYield = (m: string) => { const y = yieldBy.get(m); return y && y.rows > 500 ? y.exp / y.rows : allY.rows ? allY.exp / allY.rows : 0.5; };
@@ -45,7 +47,7 @@ export async function computePlan(weekOf?: string) {
   for (const u of uploads as any[]) {
     if (!["confirmed", "draft"].includes(u.status) || !u.report?.files) continue;
     const d = String(u.uploaded_at).slice(0, 10); if (d < ws || d > we) continue;
-    const t: any = taskOf.get(u.pull_id); const n = u.report.import_rows || 0; used += n;
+    const t: any = taskOf.get(u.pull_id); const n = exported(u.report); used += n;
     if (t) { usedBy[t.market_fips] = (usedBy[t.market_fips] || 0) + n; pulledThisWeek.add(`${t.profile_id}|${t.zip_group || "ALL"}`); }
   }
 
@@ -70,7 +72,8 @@ export async function computePlan(weekOf?: string) {
         const last = L.last; const due = L.nextDate || null;
         if (due && due > we) continue;                                // not time to recycle yet
         const fresh = last.pctNewToList != null && L.pulls.length > 1 ? last.pctNewToList / 100 : DEFAULT_REFRESH;
-        const y = last.rows ? (last.importRows || 0) / last.rows : marketYield(p.market_fips);
+        const lastUp: any = (uploads as any[]).find((u) => u.pull_id === last.pullId && u.status === "confirmed");
+        const y = last.rows && lastUp ? exported(lastUp.report) / last.rows : marketYield(p.market_fips);
         const est = Math.round((last.rows || 0) * fresh * y);
         recs.push({ ...base, kind: "recycle", est, estHow: `${(last.rows || 0).toLocaleString()} rows last time × ${Math.round(fresh * 100)}% new${L.pulls.length > 1 ? "" : " (assumed, not measured yet)"} × ${Math.round(y * 100)}% to export`,
           lastPulled: last.date, dueDate: due });
