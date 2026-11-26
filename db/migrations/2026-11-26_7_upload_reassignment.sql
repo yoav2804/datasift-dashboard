@@ -19,7 +19,7 @@ alter table upload_corrections enable row level security;
 -- Swap everything that belongs to pull A with everything that belongs to pull B.
 -- If B has nothing yet, this is a plain move of A's upload to B (and A goes back to planned).
 create or replace function swap_pull_data(a text, b text, p_reason text) returns json language plpgsql as $$
-declare pa text; pb text; ua uuid; ub uuid; d jsonb := '{}'; n int;
+declare pa text; pb text; ua uuid; ub uuid; d jsonb := '{}'; n int; tmp text;
 begin
   if a = b then raise exception 'Pick a different pull.'; end if;
   select profile_id into pa from pull_tasks where pull_id = a;
@@ -38,15 +38,24 @@ begin
     counts = case when counts ? 'pull_id' then jsonb_set(counts, '{pull_id}', to_jsonb(case pull_id when a then b else a end)) else counts end
     where pull_id in (a, b);
   get diagnostics n = row_count; d := d || jsonb_build_object('export_batches', n);
-  update property_pulls set pull_id = case pull_id when a then b else a end where pull_id in (a, b);
+  -- property rows go through a temporary pull, because a property can be on both pulls (same key on both sides)
+  tmp := 'TMP-SWAP-' || replace(gen_random_uuid()::text, '-', '');
+  insert into pull_tasks (pull_id, market_fips, status, notes) select tmp, market_fips, 'cancelled', 'temporary, used inside one correction' from pull_tasks where pull_id = a;
+  update property_pulls set pull_id = tmp where pull_id = a;
   get diagnostics n = row_count; d := d || jsonb_build_object('property_pulls', n);
+  update property_pulls set pull_id = a where pull_id = b;
+  update property_pulls set pull_id = b where pull_id = tmp;
+  delete from pull_tasks where pull_id = tmp;   -- the temporary row created above, nothing else
   -- list membership: a property linked to the wrong list moves to the right one; if it is already on the right list, the wrong link is voided (kept, ignored)
   update property_profiles pp set voided_at = now()
     where pp.first_pull_id in (a, b) and pp.voided_at is null
       and exists (select 1 from property_profiles x where x.property_id = pp.property_id and x.voided_at is null
                   and x.profile_id = case pp.first_pull_id when a then pb else pa end and x.first_pull_id not in (a, b));
-  update property_profiles set profile_id = case first_pull_id when a then pb else pa end, first_pull_id = case first_pull_id when a then b else a end
-    where first_pull_id in (a, b) and voided_at is null;
+  -- a property that is on both pulls already has both list links: those stay exactly as they are
+  update property_profiles pp set profile_id = case pp.first_pull_id when a then pb else pa end, first_pull_id = case pp.first_pull_id when a then b else a end
+    where pp.first_pull_id in (a, b) and pp.voided_at is null
+      and not exists (select 1 from property_profiles y where y.property_id = pp.property_id and y.voided_at is null
+                      and y.first_pull_id = case pp.first_pull_id when a then b else a end);
   get diagnostics n = row_count; d := d || jsonb_build_object('property_profiles', n);
   update property_phones set first_pull_id = case first_pull_id when a then b else a end where first_pull_id in (a, b);
   get diagnostics n = row_count; d := d || jsonb_build_object('property_phones', n);
