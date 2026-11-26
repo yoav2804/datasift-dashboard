@@ -1,6 +1,8 @@
 import Nav from "../nav";
 import { select } from "@/lib/sb";
 import SyncButton from "./sync";
+import Lifecycle from "./lifecycle";
+import type { By } from "@/lib/lifecycle";
 import { marketShort } from "@/lib/lists";
 export const dynamic = "force-dynamic";
 
@@ -24,7 +26,8 @@ function Table({ title, rows, label, extra }: { title: string; rows: [string, Ro
     </tbody></table></div></>);
 }
 
-export default async function Tracker() {
+export default async function Tracker({ searchParams }: { searchParams: { by?: string } }) {
+  const by = (["list", "market", "source", "provider"].includes(searchParams?.by || "") ? searchParams.by : "list") as By;
   let [exported, batches, tasks, profiles, zips, markets, outcomes, ups, sources] = await Promise.all([
     select("export_rows", { bucket: "eq.new", select: "property_id,batch_id" }), select("export_batches", { approved: "eq.true", voided_at: "is.null", select: "batch_id,pull_id,counts,created_at", order: "created_at.asc" }),
     select("pull_tasks", { select: "pull_id,profile_id,market_fips,zip_group,status,planned_date" }), select("profiles", { select: "profile_id,name,market_fips,doors_per_deal" }),
@@ -85,7 +88,7 @@ export default async function Tracker() {
     <h1>Tracker</h1>
     <p className="sub">Every number counts doors (properties), not people or messages. A lead is a seller who reached Qualified in GHL. Only contacts that came from a pull in this system are counted.</p>
     <div className="grid">
-      <div className="stat"><div className="big">{n(all.sent.size)}</div><div className="muted">doors sent to GHL</div></div>
+      <div className="stat"><div className="big">{n(all.sent.size)}</div><div className="muted">doors prepared for export (see lifecycle for confirmed imports)</div></div>
       <div className="stat"><div className="big">{n(t)}</div><div className="muted">doors texted</div></div>
       <div className="stat"><div className="big">{pct(all.ev.replied.size, t)}</div><div className="muted">reply rate</div></div>
       <div className="stat"><div className="big">{n(q)}</div><div className="muted">qualified leads</div></div>
@@ -93,6 +96,7 @@ export default async function Tracker() {
       <div className="stat"><div className="big">{per(t, all.ev.contract.size)}</div><div className="muted">doors per contract</div></div>
       <div className="stat"><div className="big">{per(t, all.ev.closed.size)}</div><div className="muted">doors per deal</div></div>
     </div>
+    <Lifecycle by={by} />
     <h2>Skip trace quality</h2>
     <div className="grid">
       <div className="stat"><div className="big">{n(all.ev.wrong_number.size)}</div><div className="muted">doors with a wrong number</div></div>

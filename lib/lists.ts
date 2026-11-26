@@ -13,7 +13,8 @@ export const fmtLong = (s: string) => fmt(s, { month: "short", day: "numeric", y
 export const ago = (s: string, t = today()) => { const n = daysBetween(s, t); return n <= 0 ? "today" : n === 1 ? "yesterday" : `${n} days ago`; };
 export const marketShort = (f: string) => (f === "29189" ? "County" : f === "29510" ? "City" : f === "29183" ? "St. Charles" : f);
 
-export type Pull = { date: string; pullId: string; file: string; rows: number; newProps: number | null; pctNewToList: number | null; importRows: number | null; files?: { results: string; import_csv: string } ; skipTrace?: string | null; sourceId?: string | null };
+export type Pull = { date: string; pullId: string; file: string; rows: number; newProps: number | null; pctNewToList: number | null; importRows: number | null; files?: { results: string; import_csv: string } ; skipTrace?: string | null; sourceId?: string | null;
+  uniquePhones?: number | null; pctOutreach?: number | null; pctDupInList?: number | null; pctShared?: number | null; pctTexted?: number | null };
 export type ListInfo = {
   key: string; profile: any; market: string; zipGroup: string; zips: string[] | null;
   pulls: Pull[]; last: Pull | null; next: any | null; nextDate: string | null;
@@ -43,7 +44,9 @@ export async function loadLists() {
     const L = get(taskById.get(u.pull_id)); if (!L) continue;
     L.pulls.push({ date: dayOf(u.uploaded_at), pullId: u.pull_id, file: decodeURIComponent(String(u.filename || "").replace(/\+/g, " ")), rows: u.row_count,
       newProps: u.report.net_new_properties ?? null, pctNewToList: u.report.pct_new_to_list ?? null, importRows: u.report.import_rows ?? null, files: u.report.files,
-      skipTrace: u.skip_trace_provider || null, sourceId: u.original_source_id || null });
+      skipTrace: u.skip_trace_provider || null, sourceId: u.original_source_id || null,
+      uniquePhones: u.report.unique_phone_numbers ?? null, pctOutreach: u.report.pct_new_for_outreach ?? null, pctDupInList: u.report.pct_numbers_duplicated_in_list ?? null,
+      pctShared: u.report.pct_numbers_shared_with_other_property ?? null, pctTexted: u.report.pct_numbers_already_in_texting ?? null });
   }
   lists.forEach((L) => {
     L.pulls.sort((a, b) => b.date.localeCompare(a.date));
