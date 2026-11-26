@@ -3,11 +3,12 @@ import { select } from "@/lib/sb";
 import TaskActions from "./taskactions";
 import { loadLists, today, weekStart, addDays, fmt, fmtLong, marketShort, daysBetween } from "@/lib/lists";
 import { History, LastPulled, StatePill } from "./history";
+import Planner from "./planner";
 export const dynamic = "force-dynamic";
 
 const isDate = (s?: string) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
 const zipText = (t: any) => t.zip_group === "ALL" || !t.zip_group ? "All ZIPs" : t.zips?.length ? `ZIP group ${t.zip_group}: ${t.zips.join(", ")}` : `ZIP group ${t.zip_group}: all other ZIPs`;
-const estDoors = (t: any) => parseInt((t.notes || "").replace(/[^\d]/g, "")) || 0;
+const estDoors = (t: any) => t.est_export_doors ?? (parseInt((t.notes || "").replace(/[^\d]/g, "")) || 0);
 
 export default async function Calendar({ searchParams }: { searchParams: { week?: string } }) {
   const t0 = today(), thisWeek = weekStart(t0);
@@ -40,7 +41,7 @@ export default async function Calendar({ searchParams }: { searchParams: { week?
         <div style={{ marginTop: 4 }}><span className="tag ok">{m.name || t.market_fips}</span><span className={`tag p${p.priority}`}>Priority {p.priority}</span>
           <span className="tag">{p.doors_per_deal} doors/deal</span>{t.status === "draft" && <span className="tag warn">uploaded as draft: confirm or undo</span>}{late && <span className="tag warn">planned {fmt(t.planned_date)}, {daysBetween(t.planned_date, t0)} days late</span>}
           {isPast && !late && <span className="tag warn">not pulled</span>}</div>
-        <div className="muted" style={{ marginTop: 6 }}>{zipText(t)}{estDoors(t) ? ` · about ${estDoors(t).toLocaleString()} new doors` : ""}</div>
+        <div className="muted" style={{ marginTop: 6 }}>{zipText(t)}{estDoors(t) ? ` · estimate: about ${estDoors(t).toLocaleString()} properties to outreach` : ""}</div>
         <div style={{ marginTop: 8 }}><LastPulled L={L} /></div>
       </div><TaskActions pullId={t.pull_id} draft={t.status === "draft"} /></div>
       {p.caveats && <div style={{ marginTop: 8 }}><span className="tag warn">{p.caveats}</span></div>}
@@ -58,11 +59,12 @@ export default async function Calendar({ searchParams }: { searchParams: { week?
       <form method="get" action="/" className="jump"><input type="date" name="week" defaultValue={ws} aria-label="Pick a date" /><button type="submit">Go</button></form>
       {!isCurrent && <a className="btn primary" href="/">Back to this week</a>}
     </div>
+    {!isPast && <Planner week={ws} />}
     <div className="grid">
       <div className="stat"><div className="big">{toPull.length}</div><div className="muted">to pull this week</div></div>
       <div className="stat"><div className="big">{done.length}</div><div className="muted">pulled this week</div></div>
       {isCurrent && <div className="stat"><div className="big" style={overdue.length ? { color: "var(--warn)" } : {}}>{overdue.length}</div><div className="muted">late from earlier weeks</div></div>}
-      <div className="stat"><div className="big">{toPull.reduce((s: number, t: any) => s + estDoors(t), 0).toLocaleString()}</div><div className="muted">est. new doors</div></div>
+      <div className="stat"><div className="big">{toPull.reduce((s: number, t: any) => s + estDoors(t), 0).toLocaleString()}</div><div className="muted">est. properties to outreach</div></div>
     </div>
 
     {overdue.length > 0 && <><h2>Late: still waiting from earlier weeks</h2>
