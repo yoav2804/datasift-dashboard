@@ -15,9 +15,10 @@ export function History({ L, title = "Pull history", open = false }: { L: ListIn
   if (!L) return null;
   return (<details className="hist" open={open}>
     <summary><span className="chev" aria-hidden>›</span>{title} <span className="muted">({L.pulls.length} {L.pulls.length === 1 ? "pull" : "pulls"})</span></summary>
-    {L.pulls.length ? <div className="tablewrap" style={{ marginTop: 10 }}><table><thead><tr><th>Date pulled</th><th>Rows</th><th>New to us</th><th>New to this list</th><th>To GHL</th><th>Files</th></tr></thead><tbody>
+    {L.pulls.length ? <div className="tablewrap" style={{ marginTop: 10 }}><table><thead><tr><th>Date pulled</th><th>Skip trace</th><th>Rows</th><th>New to us</th><th>New to this list</th><th>To GHL</th><th>Files</th></tr></thead><tbody>
       {L.pulls.map((p) => <tr key={p.pullId + p.date}>
         <td><b>{fmtLong(p.date)}</b><div className="muted">{ago(p.date)} · <code>{p.pullId}</code></div></td>
+        <td>{p.skipTrace || "–"}{p.sourceId && p.sourceId !== "PROPSTREAM" && <div className="muted">source: {p.sourceId}</div>}</td>
         <td>{p.rows?.toLocaleString()}</td><td>{p.newProps?.toLocaleString() ?? "–"}</td>
         <td>{L.pulls.length > 1 && p !== L.pulls[L.pulls.length - 1] && p.pctNewToList != null ? `${p.pctNewToList}%` : <span className="muted">first pull</span>}</td>
         <td>{p.importRows?.toLocaleString() ?? "–"}</td>

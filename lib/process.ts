@@ -25,7 +25,7 @@ async function inChunks<T>(vals: string[], size: number, fn: (part: string[]) =>
   return out;
 }
 
-export async function processFile(buf: ArrayBuffer, filename: string, pullId: string, opts: { market?: string; notes?: string; storagePath?: string } = {}) {
+export async function processFile(buf: ArrayBuffer, filename: string, pullId: string, opts: { market?: string; notes?: string; storagePath?: string; skipTrace?: string; sourceId?: string } = {}) {
   const NOW = new Date().toISOString();
   const sha = crypto.createHash("sha256").update(Buffer.from(buf)).digest("hex");
   if ((await select("uploads", { file_sha256: `eq.${sha}`, select: "upload_id" })).length) throw new Error("This exact file was already uploaded. Nothing was done.");
@@ -54,7 +54,12 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
   taskMarket = pt.market_fips || null;
   const profileId = pt.profile_id;
   const prevStatus = pt.status;
-  const [upload] = await upsert("uploads", [{ pull_id: pullId, filename, file_sha256: sha, row_count: RECS.length, status: "draft", storage_path: opts.storagePath || null }], { returning: true });
+  // where the list came from (the original source) and who found the phone numbers (the skip trace provider)
+  const prof0 = pt.profile_id ? (await select("profiles", { profile_id: `eq.${pt.profile_id}`, select: "source_id" }))[0] : null;
+  const sourceId = opts.sourceId || pt.source_id || prof0?.source_id || "PROPSTREAM";
+  const skipTrace = (opts.skipTrace || "PropStream").trim();
+  const [upload] = await upsert("uploads", [{ pull_id: pullId, filename, file_sha256: sha, row_count: RECS.length, status: "draft", storage_path: opts.storagePath || null,
+    skip_trace_provider: skipTrace, original_source_id: sourceId }], { returning: true });
   await update("pull_tasks", { pull_id: `eq.${pullId}` }, { status: "draft" });
 
   try {
@@ -323,7 +328,7 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       const outside = props.filter((x) => !allowed.has(z5(x.r["Zip"]))).length;
       if (outside) warnings.push(`${outside} of ${props.length} properties are outside this pull's ZIP group (${pt.zip_group}).`);
     }
-    const report: any = { upload_id: upload.upload_id, warnings, pull_id: pullId, file: filename, rows_in_file: RECS.length, duplicate_rows_in_file: dupInFile, unique_properties: props.length,
+    const report: any = { upload_id: upload.upload_id, warnings, skip_trace_provider: skipTrace, source_id: sourceId, pull_id: pullId, file: filename, rows_in_file: RECS.length, duplicate_rows_in_file: dupInFile, unique_properties: props.length,
       net_new_properties: props.filter((x) => x.wasNew).length, already_known_properties: props.filter((x) => !x.wasNew).length,
       non_residential_properties: props.filter((x) => !isResidential(x.r["Property Type"])).length,
       properties_with_any_phone: new Set(items.map((i) => i.x.pid)).size, unique_valid_phones: allp.length, property_phone_pairs: items.length,
