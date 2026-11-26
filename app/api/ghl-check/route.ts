@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 // READ ONLY diagnostic: which GHL message endpoints can our API key read? Nothing is written anywhere.
-const KEEP = /^(status|direction|messageType|type|channel|source|errorCode|error|code|nextCursor|total|traceId)$/i;
+const KEEP = /^(status|direction|messageType|type|channel|source|errorCode|error|code|nextCursor|total|traceId|message|statusCode)$/i;
 function strip(v: any, k = ""): any {
-  if (Array.isArray(v)) return v.slice(0, 2).map((x) => strip(x));
+  if (Array.isArray(v)) return v.slice(0, 2).map((x) => (KEEP.test(k) && typeof x === "string" ? x : strip(x)));
   if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([kk, vv]) => [kk, strip(vv, kk)]));
   return KEEP.test(k) ? v : typeof v;
 }
@@ -10,7 +10,9 @@ export async function GET() {
   const loc = process.env.GHL_LOCATION_ID;
   const tries: [string, string][] = [
     ["conversations/search", `locationId=${loc}&limit=1`],
-    ["conversations/messages/export", `locationId=${loc}&limit=1&channel=SMS`],
+    ["conversations/messages/export", `locationId=${loc}&limit=10&channel=SMS`],
+    ["conversations/messages/export", `locationId=${loc}&limit=10`],
+    ["conversations/messages/export", `locationId=${loc}`],
   ];
   const out: any[] = [];
   for (const [path, qs] of tries) {
