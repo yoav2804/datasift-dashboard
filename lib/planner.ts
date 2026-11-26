@@ -9,6 +9,9 @@
 //   5. Estimates come from history and get replaced by actual numbers as files are uploaded during the week.
 import { select } from "./sb";
 import { loadLists, addDays, today, weekStart, daysBetween, marketShort } from "./lists";
+import { loadRecycling } from "./recycling";
+import { loadZipCoverage, zipsOfList, needsCoverage, ZipCov } from "./zips";
+export const SURPLUS = 1.15;   // plan ~15% over capacity: better a surplus than running out of new data mid-week
 
 export type Settings = { daily_capacity: number; working_days: number };
 export const DEFAULT_SETTINGS: Settings = { daily_capacity: 1000, working_days: 6 };
@@ -25,11 +28,14 @@ export type Rec = {
   key: string; profileId: string; sourceId: string; name: string; market: string; zipGroup: string; zips: string[] | null; priority: number; dpd: number | null; rung: number | null;
   kind: "never" | "recycle"; est: number; estHow: string; lastPulled: string | null; dueDate: string | null;
   plannedTask: any | null;   // an existing planned pull for this list, if any
+  covers: string[];          // target ZIPs needing coverage that this list reaches
+  why: string[];             // plain reasons it was picked
 };
 
 export async function computePlan(weekOf?: string) {
   const ws = weekStart(weekOf || today()), we = addDays(ws, 6), t0 = today();
-  const [settings, { tasks, profiles, prof, uploads, lists }] = await Promise.all([getSettings(), loadLists()]);
+  const [settings, { tasks, profiles, prof, uploads, lists }, recycling, cov] = await Promise.all([getSettings(), loadLists(), loadRecycling(), loadZipCoverage(weekOf)]);
+  const needZips = cov.zips.filter(needsCoverage);
   const capacity = settings.daily_capacity * settings.working_days;
 
   // history: how many properties end up in the outreach export per row pulled, per market
@@ -41,6 +47,15 @@ export async function computePlan(weekOf?: string) {
   }
   const allY = Array.from(yieldBy.values()).reduce((a, y) => ({ rows: a.rows + y.rows, exp: a.exp + y.exp }), { rows: 0, exp: 0 });
   const marketYield = (m: string) => { const y = yieldBy.get(m); return y && y.rows > 500 ? y.exp / y.rows : allY.rows ? allY.exp / allY.rows : 0.5; };
+
+  // estimate vs actual: pulls planned with an estimate that have since been uploaded and confirmed
+  const upByPull = new Map((uploads as any[]).filter((u) => u.status === "confirmed" && u.report?.files).map((u) => [u.pull_id, u]));
+  const checks = (tasks as any[]).filter((t) => t.est_export_doors > 0 && upByPull.has(t.pull_id))
+    .map((t) => ({ pullId: t.pull_id, market: t.market_fips, profileId: t.profile_id, est: t.est_export_doors, actual: exported((upByPull.get(t.pull_id) as any).report), date: String((upByPull.get(t.pull_id) as any).uploaded_at).slice(0, 10) }));
+  const calib = new Map<string, { f: number; n: number }>();
+  for (const m of Array.from(new Set(checks.map((c) => c.market)))) { const cs = checks.filter((c) => c.market === m);
+    if (cs.length >= 2) calib.set(m, { f: Math.min(2, Math.max(0.5, cs.reduce((s, c) => s + c.actual, 0) / cs.reduce((s, c) => s + c.est, 0))), n: cs.length }); }
+  const adj = (m: string, v: number, how: string): [number, string] => { const c = calib.get(m); return c ? [Math.round(v * c.f), `${how}; × ${c.f.toFixed(2)} from ${c.n} past estimates in ${marketShort(m)}`] : [Math.round(v), how]; };
 
   // used this week: properties actually exported (confirmed or waiting as a draft) from uploads made this week
   let used = 0; const usedBy: Record<string, number> = {}; const pulledThisWeek = new Set<string>();
@@ -64,39 +79,60 @@ export async function computePlan(weekOf?: string) {
       const sample = (tasks as any[]).find((t) => t.profile_id === p.profile_id && (t.zip_group || "ALL") === g);
       const planned = (tasks as any[]).filter((t) => t.profile_id === p.profile_id && (t.zip_group || "ALL") === g && t.status === "planned").sort((a, b) => (a.planned_date || "9").localeCompare(b.planned_date || "9"))[0] || null;
       const share = groups.length > 1 ? 1 / groups.length : 1;     // a ZIP group is roughly an equal slice of the list
-      const base = { key, profileId: p.profile_id, sourceId: sample?.source_id || p.source_id, name: p.name, market: p.market_fips, zipGroup: g, zips: sample?.zips || null, priority: p.priority ?? 9, dpd: p.doors_per_deal ?? null, rung: p.rung ?? null, plannedTask: planned };
-      if (!L?.last) {
+      const covers = zipsOfList(needZips, p.market_fips, g).map((z) => z.zip);
+      const base = { key, profileId: p.profile_id, sourceId: sample?.source_id || p.source_id, name: p.name, market: p.market_fips, zipGroup: g, zips: sample?.zips || null, priority: p.priority ?? 9, dpd: p.doors_per_deal ?? null, rung: p.rung ?? null, plannedTask: planned, covers, why: [] as string[] };
+      const R = recycling.get(key);
+      if (!R && !L?.last) {
         const rows = Math.round((p.list_size || 0) * share); const y = marketYield(p.market_fips);
-        recs.push({ ...base, kind: "never", est: Math.round(rows * y), estHow: `${rows.toLocaleString()} on the DataSift list × ${Math.round(y * 100)}% that reach the export in ${marketShort(p.market_fips)}`, lastPulled: null, dueDate: null });
+        const [est, estHow] = adj(p.market_fips, rows * y, `${rows.toLocaleString()} on the DataSift list × ${Math.round(y * 100)}% that reach outreach with new numbers in ${marketShort(p.market_fips)}`);
+        recs.push({ ...base, kind: "never", est, estHow, lastPulled: null, dueDate: null });
       } else {
-        const last = L.last; const due = L.nextDate || null;
+        // recycling date and refresh come from the list's own re-pulls (smart recycling)
+        const lastDate = R?.lastDate || L.last.date, due = R?.nextDate || L?.nextDate || null;
         if (due && due > we) continue;                                // not time to recycle yet
-        const fresh = last.pctNewToList != null && L.pulls.length > 1 ? last.pctNewToList / 100 : DEFAULT_REFRESH;
-        const lastUp: any = (uploads as any[]).find((u) => u.pull_id === last.pullId && u.status === "confirmed");
-        const y = last.rows && lastUp ? exported(lastUp.report) / last.rows : marketYield(p.market_fips);
-        const est = Math.round((last.rows || 0) * fresh * y);
-        recs.push({ ...base, kind: "recycle", est, estHow: `${(last.rows || 0).toLocaleString()} rows last time × ${Math.round(fresh * 100)}% new${L.pulls.length > 1 ? "" : " (assumed, not measured yet)"} × ${Math.round(y * 100)}% to export`,
-          lastPulled: last.date, dueDate: due });
+        const elapsed = daysBetween(lastDate, addDays(ws, 3));
+        const fresh = R?.learnedPerMonth != null ? Math.min(1, (R.learnedPerMonth * Math.max(elapsed, 30)) / 30) : DEFAULT_REFRESH;
+        const rows = R?.lastRows || L?.last?.rows || 0, y = R?.lastYield ?? marketYield(p.market_fips);
+        const [est, estHow] = adj(p.market_fips, rows * fresh * y, `${rows.toLocaleString()} rows last time × ${Math.round(fresh * 100)}% expected new after ${elapsed} days${R?.measured ? " (learned)" : " (assumed until the first re-pull measures it)"} × ${Math.round(y * 100)}% to outreach`);
+        recs.push({ ...base, kind: "recycle", est, estHow, lastPulled: lastDate, dueDate: due });
       }
     }
   }
 
   // pick: never-pulled first, then recycled; markets balanced by planned properties
-  const order = (a: Rec, b: Rec) => (a.kind === b.kind ? 0 : a.kind === "never" ? -1 : 1) || a.priority - b.priority || (a.dpd ?? 1e9) - (b.dpd ?? 1e9)
+  const order = (a: Rec, b: Rec) => (a.kind === b.kind ? 0 : a.kind === "never" ? -1 : 1) || a.priority - b.priority
+    || (b.covers.length > 0 ? 1 : 0) - (a.covers.length > 0 ? 1 : 0) || (a.dpd ?? 1e9) - (b.dpd ?? 1e9)
     || (a.lastPulled || "").localeCompare(b.lastPulled || "") || a.key.localeCompare(b.key);
   const queues = new Map<string, Rec[]>();
   for (const r of recs.filter((r) => r.est > 0).sort(order)) { if (!queues.has(r.market)) queues.set(r.market, []); queues.get(r.market)!.push(r); }
   const plannedBy: Record<string, number> = { ...usedBy }; const picks: Rec[] = []; let total = used;
-  while (total < capacity) {
+  const target = Math.round(capacity * SURPLUS);
+  while (total < target) {
     const open = Array.from(queues.entries()).filter(([, q]) => q.length);
     if (!open.length) break;
     // the market with the fewest planned properties goes next; never-pulled lists anywhere still beat recycled ones
     const anyNever = open.some(([, q]) => q[0].kind === "never");
     const cand = open.filter(([, q]) => !anyNever || q[0].kind === "never").sort((a, b) => (plannedBy[a[0]] || 0) - (plannedBy[b[0]] || 0))[0];
     const r = cand[1].shift()!; picks.push(r); total += r.est; plannedBy[r.market] = (plannedBy[r.market] || 0) + r.est;
+    r.why.push(r.kind === "never" ? "never pulled" : "recycle due", `fills ${marketShort(r.market)}`);
   }
+  // ZIP coverage: a target ZIP left uncovered gets the best eligible list that reaches it, even past the target
+  const coveredBy = (zip: string) => picks.some((r) => r.covers.includes(zip));
+  for (const z of needZips) {
+    if (coveredBy(z.zip)) continue;
+    const q = queues.get(z.market) || []; const i = q.findIndex((r) => r.covers.includes(z.zip));
+    if (i >= 0) { const r = q.splice(i, 1)[0]; picks.push(r); total += r.est; plannedBy[r.market] = (plannedBy[r.market] || 0) + r.est; r.why.push(`covers ZIP ${z.zip} (${z.statusText.toLowerCase()})`); }
+  }
+  picks.forEach((r) => { const c = r.covers.filter((x) => !r.why.some((w) => w.includes(x))); if (c.length && !r.why.some((w) => w.startsWith("covers"))) r.why.push(`reaches ${c.length} ZIP${c.length === 1 ? "" : "s"} needing coverage`); });
+  // ZIPs still not covered this week, and why
+  const allByZip = (z: ZipCov) => recs.filter((r) => r.market === z.market && (r.zipGroup === "ALL" || r.zipGroup === z.group));
+  const uncovered = needZips.filter((z) => !coveredBy(z.zip)).map((z) => {
+    const waiting = (tasks as any[]).filter((t) => t.market_fips === z.market && t.profile_id && (t.zip_group === "ALL" || t.zip_group === z.group)).length;
+    const why = allByZip(z).length ? "lists covering it were not needed this week" : waiting ? "every list covering it is waiting for its recycle date" : "no pullable list covers this ZIP";
+    return { ...z, why };
+  });
   const notPicked = recs.filter((r) => !picks.includes(r)).sort(order);
-  return { ws, we, t0, settings, capacity, used, usedBy, planned: total - used, remaining: Math.max(0, capacity - total), picks, notPicked,
+  return { ws, we, t0, settings, capacity, target, used, usedBy, planned: total - used, remaining: Math.max(0, capacity - total), picks, notPicked, checks, calib: Object.fromEntries(calib), zips: cov.zips, uncovered,
     marketYield: Object.fromEntries(Array.from(yieldBy.keys()).map((m) => [m, marketYield(m)])), prof };
 }
 
