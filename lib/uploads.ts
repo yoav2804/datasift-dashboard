@@ -43,6 +43,9 @@ export async function confirmUpload(uploadId: string) {
   await update("export_batches", { upload_id: `eq.${uploadId}` }, { approved: true, approved_at: at });
   await update("pull_tasks", { pull_id: `eq.${u.pull_id}` }, { status: "processed", completed_date: at.slice(0, 10), rows_pulled: rep.rows_in_file ?? null,
     net_new_properties: rep.net_new_properties ?? null, contacts_generated: rep.import_rows ?? null, next_pull_date: rep.next_pull_date || null });
+  // the list was just pulled: any other planned pull of the same list is replaced by the smart-recycling date below
+  if (pt.profile_id)
+    await update("pull_tasks", { profile_id: `eq.${pt.profile_id}`, zip_group: `eq.${pt.zip_group || "ALL"}`, status: "eq.planned", pull_id: `neq.${u.pull_id}` }, { status: "superseded", notes: `replaced by pull ${u.pull_id}` });
   if (pt.profile_id && rep.next_pull_date)
     await upsert("pull_tasks", [{ pull_id: `${u.pull_id.replace(/-\d{8}$/, "")}-${String(rep.next_pull_date).replace(/-/g, "")}`, market_fips: pt.market_fips, profile_id: pt.profile_id,
       zip_group: pt.zip_group, zips: pt.zips, source_id: pt.source_id, priority: pt.priority, planned_date: rep.next_pull_date, status: "planned", notes: `recycle: ${rep.refresh_note || ""}` }],
