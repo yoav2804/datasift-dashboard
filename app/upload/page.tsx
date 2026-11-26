@@ -1,7 +1,7 @@
 import Nav from "../nav";
 import { select } from "@/lib/sb";
 import Uploader from "./uploader";
-import DraftActions, { Reprocess } from "./draftactions";
+import DraftActions, { Reprocess, Reassign } from "./draftactions";
 import { marketShort } from "@/lib/lists";
 export const dynamic = "force-dynamic";
 
@@ -11,10 +11,11 @@ const when = (s?: string) => (s ? new Date(s).toLocaleString("en-GB", { timeZone
 export default async function Upload({ searchParams }: { searchParams: { pull?: string } }) {
   const [tasks, allTasks, profiles, uploads, sources] = await Promise.all([
     select("pull_tasks", { order: "planned_date.asc,pull_id.asc", status: "eq.planned" }),
-    select("pull_tasks", { select: "pull_id,profile_id,market_fips,zip_group,source_id" }),
+    select("pull_tasks", { select: "pull_id,profile_id,market_fips,zip_group,source_id,status,planned_date", order: "market_fips.asc,profile_id.asc,planned_date.asc" }),
     select("profiles", { select: "profile_id,rung,name,source_id" }),
     select("uploads", { order: "uploaded_at.desc", select: "upload_id,pull_id,filename,uploaded_at,row_count,report,status,storage_path,voided_at,void_reason,confirmed_at,skip_trace_provider,original_source_id" }),
     select("sources", { select: "source_id,name,kind,market_fips", order: "kind.asc,name.asc" })]);
+  const corrections = await select("upload_corrections", { order: "corrected_at.desc", limit: "20" }).catch(() => []);
   const srcName = new Map(sources.map((s: any) => [s.source_id, s.name]));
   const origin = (u: any) => `${srcName.get(u.original_source_id) || u.original_source_id || "?"} · skip trace: ${u.skip_trace_provider || "?"}`;
   const prof = new Map(profiles.map((p: any) => [p.profile_id, p]));
@@ -25,6 +26,9 @@ export default async function Upload({ searchParams }: { searchParams: { pull?: 
   const opts = tasks.map((t: any) => ({ id: t.pull_id, label: label(t) }));
   const pullSource: Record<string, string> = Object.fromEntries(tasks.map((t: any) => [t.pull_id, t.source_id || (prof.get(t.profile_id) as any)?.source_id || "PROPSTREAM"]));
   const srcOpts = sources.map((s: any) => ({ id: s.source_id, name: s.name }));
+  // every pull of every list, for correcting a confirmed upload
+  const fixOpts = (allTasks as any[]).filter((t) => t.profile_id && !["cancelled", "superseded", "skipped"].includes(t.status))
+    .map((t) => ({ id: t.pull_id, label: `${label(t, false)} · ${t.status === "processed" ? "has an upload (would swap)" : t.status}${t.planned_date ? ` · ${t.planned_date}` : ""} · ${t.pull_id}` }));
   const drafts = uploads.filter((u: any) => u.status === "draft" && u.report?.files);
   const voided = uploads.filter((u: any) => u.status === "voided").slice(0, 15);
   const done = uploads.filter((u: any) => u.status === "confirmed" && u.report?.files);
@@ -59,8 +63,17 @@ export default async function Upload({ searchParams }: { searchParams: { pull?: 
     <div className="tablewrap"><table><thead><tr><th>When</th><th>Pull</th><th>Source · skip trace</th><th>File</th><th>Rows</th><th>New props</th><th>Import rows</th><th>Review</th><th>Files</th></tr></thead><tbody>
       {done.map((u: any) => <tr key={u.upload_id}><td>{when(u.uploaded_at)}</td><td>{pullLabel(u.pull_id)}<div className="muted"><code>{u.pull_id}</code></div></td><td>{origin(u)}</td><td>{u.filename}</td>
         <td>{u.row_count}</td><td>{u.report.net_new_properties}</td><td>{u.report.import_rows}</td><td>{u.report.multi_property_review}</td>
-        <td><a href={dl(u.report.files.results)}>Results</a> · <a href={dl(u.report.files.import_csv)}>GHL CSV</a></td></tr>)}
+        <td><a href={dl(u.report.files.results)}>Results</a> · <a href={dl(u.report.files.import_csv)}>GHL CSV</a><div style={{ marginTop: 6 }}><Reassign uploadId={u.upload_id} options={fixOpts.filter((o) => o.id !== u.pull_id)} /></div></td></tr>)}
       {!done.length && <tr><td colSpan={9} className="muted">None yet.</td></tr>}
+    </tbody></table></div>
+
+    <h2 id="corrections">Corrections</h2>
+    <p className="sub">Every time a confirmed upload was moved to another list. History, results and review cases moved with it; nothing was exported again.</p>
+    <div className="tablewrap"><table><thead><tr><th>When</th><th>Type</th><th>From</th><th>To</th><th>Reason</th><th>Rows re-labelled</th></tr></thead><tbody>
+      {corrections.map((c: any) => <tr key={c.correction_id}><td>{when(c.corrected_at)}</td><td>{c.kind}</td><td>{pullLabel(c.from_pull_id)}<div className="muted"><code>{c.from_pull_id}</code></div></td>
+        <td>{pullLabel(c.to_pull_id)}<div className="muted"><code>{c.to_pull_id}</code></div></td><td>{c.reason}</td>
+        <td className="muted">{Object.entries(c.details || {}).map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`).join(" · ")}</td></tr>)}
+      {!corrections.length && <tr><td colSpan={6} className="muted">No corrections yet.</td></tr>}
     </tbody></table></div>
   </>);
 }

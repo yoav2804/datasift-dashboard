@@ -50,3 +50,22 @@ export function Reprocess({ path, filename, options, skipTrace, sourceId }: { pa
     {err && <div className="err">{err}</div>}
   </div>);
 }
+
+// Fix the list of a CONFIRMED upload (keeps all history; swaps if the target pull already has an upload).
+export function Reassign({ uploadId, options }: { uploadId: string; options: { id: string; label: string }[] }) {
+  const [open, setOpen] = useState(false); const [to, setTo] = useState(""); const [why, setWhy] = useState(""); const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
+  if (!open) return <button onClick={() => setOpen(true)} style={{ fontSize: 12 }}>Fix list…</button>;
+  async function go() {
+    const t = options.find((o) => o.id === to)?.label || to;
+    if (!confirm(`Move this upload to:\n${t}\n\nAll its history moves with it (list stats, recycling, results, review cases). Nothing is exported again and numbers already sent stay excluded. If that pull already has an upload, the two swap.`)) return;
+    setBusy(true); setErr("");
+    try { const r = await (await fetch("/api/upload-action", { method: "POST", body: JSON.stringify({ uploadId, action: "reassign", toPull: to, reason: why }) })).json();
+      if (r.ok === false || r.error) throw new Error(r.error || "Failed"); location.href = "/upload#corrections"; location.reload(); }
+    catch (e: any) { setErr(e.message); setBusy(false); }
+  }
+  return (<div style={{ display: "grid", gap: 6, minWidth: 260 }}>
+    <select value={to} onChange={(e) => setTo(e.target.value)} aria-label="Correct pull"><option value="">Move to the correct pull…</option>{options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}</select>
+    <input placeholder="Reason (for the audit history)" value={why} onChange={(e) => setWhy(e.target.value)} />
+    <div style={{ display: "flex", gap: 6 }}><button className="primary" disabled={!to || why.trim().length < 3 || busy} onClick={go}>{busy ? "Moving…" : "Move"}</button><button onClick={() => setOpen(false)} disabled={busy}>Cancel</button></div>
+    {err && <div className="err">{err}</div>}</div>);
+}
