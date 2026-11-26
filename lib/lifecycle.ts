@@ -7,12 +7,12 @@ import { marketShort } from "./lists";
 export type By = "list" | "market" | "source" | "provider";
 export type Stage = {
   uploads: number; properties: number; received: number; removed: number; removedWhy: Record<string, number>;
-  inTexting: number; repeated: number; prepared: number; imported: number; waiting: number; missing: number;
+  inTexting: number; repeated: number; prepared: number; imported: number; importedProps: number; waiting: number; missing: number;
   messaged: number; msgSent: number; delivered: number; pending: number; badNumber: number; carrierBlock: number; platformLimit: number; otherError: number; optedOut: number;
   contacted: Set<string>; replied: Set<string>; wrong: Set<string>; qualified: Set<string>;
   q: { n: number; unique: number; repeated: number; inDb: number; inTexting: number; shared: number; diffOwner: number };
 };
-const blank = (): Stage => ({ uploads: 0, properties: 0, received: 0, removed: 0, removedWhy: {}, inTexting: 0, repeated: 0, prepared: 0, imported: 0, waiting: 0, missing: 0,
+const blank = (): Stage => ({ uploads: 0, properties: 0, received: 0, removed: 0, removedWhy: {}, inTexting: 0, repeated: 0, prepared: 0, imported: 0, importedProps: 0, waiting: 0, missing: 0,
   messaged: 0, msgSent: 0, delivered: 0, pending: 0, badNumber: 0, carrierBlock: 0, platformLimit: 0, otherError: 0, optedOut: 0, contacted: new Set(), replied: new Set(), wrong: new Set(), qualified: new Set(),
   q: { n: 0, unique: 0, repeated: 0, inDb: 0, inTexting: 0, shared: 0, diffOwner: 0 } });
 
@@ -44,7 +44,7 @@ export async function loadLifecycle(by: By) {
   }
   const imported = new Set(batches.filter((b: any) => b.imported_to_ghl_at).map((b: any) => b.batch_id));
   for (const c of counts as any[]) { const k = bKey.get(c.batch_id); if (!k) continue; const G = get(k);
-    if (c.bucket === "new") { G.prepared += c.phones; G.imported += c.imported_phones; if (imported.has(c.batch_id)) G.missing += c.phones - c.imported_phones; else G.waiting += c.phones; }
+    if (c.bucket === "new") { G.prepared += c.phones; G.imported += c.imported_phones; G.importedProps += c.imported_props; if (imported.has(c.batch_id)) G.missing += c.phones - c.imported_phones; else G.waiting += c.phones; }
     else if (c.bucket === "in_texting" || c.bucket === "existing") G.inTexting += c.phones;   // "existing" = older uploads
     else if (c.bucket === "dup_in_list") G.repeated += c.phones; }
   for (const r of reasons as any[]) { const k = bKey.get(r.batch_id); if (!k) continue; const G = get(k); G.removed += r.phones; G.removedWhy[r.reason] = (G.removedWhy[r.reason] || 0) + r.phones; }
@@ -55,7 +55,7 @@ export async function loadLifecycle(by: By) {
     if (o.event === "contacted") G.contacted.add(o.property_id); if (o.event === "replied") G.replied.add(o.property_id);
     if (o.event === "wrong_number") G.wrong.add(o.property_id); if (o.event === "qualified") G.qualified.add(o.property_id); }
   const rows = Array.from(groups.entries()).sort((a, b) => b[1].received - a[1].received);
-  const total = blank(); for (const [, G] of rows) for (const f of ["uploads", "properties", "received", "removed", "inTexting", "repeated", "prepared", "imported", "waiting", "missing", "messaged", "msgSent", "delivered", "pending", "badNumber", "carrierBlock", "platformLimit", "otherError", "optedOut"] as const) (total as any)[f] += G[f];
+  const total = blank(); for (const [, G] of rows) for (const f of ["uploads", "properties", "received", "removed", "inTexting", "repeated", "prepared", "imported", "importedProps", "waiting", "missing", "messaged", "msgSent", "delivered", "pending", "badNumber", "carrierBlock", "platformLimit", "otherError", "optedOut"] as const) (total as any)[f] += G[f];
   for (const [, G] of rows) { for (const s of ["contacted", "replied", "wrong", "qualified"] as const) G[s].forEach((x) => total[s].add(x));
     for (const [w, n] of Object.entries(G.removedWhy)) total.removedWhy[w] = (total.removedWhy[w] || 0) + n;
     for (const f of Object.keys(total.q) as (keyof Stage["q"])[]) total.q[f] += G.q[f]; }

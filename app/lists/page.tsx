@@ -2,6 +2,8 @@ import Nav from "../nav";
 import { select } from "@/lib/sb";
 import { loadLists, fmtLong, ago, marketShort, ListInfo } from "@/lib/lists";
 import { History, StatePill } from "../history";
+import { RecycleSummary, RecycleHistory } from "../recycling";
+import { loadRecycling } from "@/lib/recycling";
 export const dynamic = "force-dynamic";
 
 const order = (L: ListInfo) => (L.state === "ready" ? 0 : L.state === "never" && L.daysLeft <= 0 ? 1 : L.state === "waiting" || L.state === "never" ? 2 : 3);
@@ -9,7 +11,7 @@ const order = (L: ListInfo) => (L.state === "ready" ? 0 : L.state === "never" &&
 export default async function ListLog({ searchParams }: { searchParams: { market?: string; show?: string } }) {
   const market = ["29510", "29189", "29183"].includes(searchParams.market || "") ? searchParams.market! : "all";
   const show = ["ready", "waiting", "never"].includes(searchParams.show || "") ? searchParams.show! : "all";
-  const [{ lists, profiles }, markets, sources] = await Promise.all([loadLists(), select("markets", {}), select("sources", { kind: "eq.public_record", order: "source_id.asc" })]);
+  const [{ lists, profiles }, markets, sources, recycling] = await Promise.all([loadLists(), select("markets", {}), select("sources", { kind: "eq.public_record", order: "source_id.asc" }), loadRecycling()]);
   const mk = new Map(markets.map((m: any) => [m.fips, m]));
   const all = Array.from(lists.values()).filter((L) => L.profile);
   const ready = (L: ListInfo) => L.daysLeft <= 0 && (L.state === "ready" || L.state === "never");
@@ -44,12 +46,15 @@ export default async function ListLog({ searchParams }: { searchParams: { market
         <div><span className="chev" aria-hidden>›</span><b>{L.profile.name}</b>
           <div className="muted sub2">{marketShort(L.market)}{L.zipGroup !== "ALL" ? ` · ZIP group ${L.zipGroup}` : " · all ZIPs"} · pulled {L.pulls.length}×</div></div>
         <div><span className="mlabel">Last pulled</span>{L.last ? <>{fmtLong(L.last.date)}<div className="muted">{ago(L.last.date)}</div></> : <span className="muted">Never</span>}</div>
-        <div><span className="mlabel">Next pull</span>{L.nextDate ? fmtLong(L.nextDate) : <span className="muted">Not scheduled</span>}</div>
+        <div><span className="mlabel">Next pull</span>{L.nextDate ? fmtLong(L.nextDate) : <span className="muted">Not scheduled</span>}
+          {recycling.get(L.key) && <div className="muted">recommended {fmtLong(recycling.get(L.key)!.nextDate)}</div>}</div>
         <div><StatePill L={L} /></div>
       </summary>
       <div className="logbody">
         {L.zips?.length ? <div className="muted">ZIPs: {L.zips.join(", ")}</div> : null}
         <div className="filter"><b>PropStream filters</b><div>{L.profile.filter_definition?.text || "Not drafted yet"}</div></div>
+        <RecycleSummary R={recycling.get(L.key)} />
+        <RecycleHistory R={recycling.get(L.key)} />
         <History L={L} title="Every time this list was pulled" open />
       </div>
     </details>))}

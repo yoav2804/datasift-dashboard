@@ -6,6 +6,7 @@ import crypto from "crypto";
 import { select, upsert, update, putObject } from "./sb";
 import { norm } from "./phones";
 import { voidPullRows } from "./uploads";
+import { NO_DATA_INTERVAL, intervalFor, perMonthOf, learn } from "./recycling";
 
 const COUNTY_FIPS: Record<string, string> = { "SAINT LOUIS CITY": "29510", "ST LOUIS CITY": "29510", "SAINT LOUIS": "29189", "ST LOUIS": "29189", "SAINT CHARLES": "29183", "ST CHARLES": "29183",
   "SAINT LOUIS COUNTY": "29189", "ST LOUIS COUNTY": "29189", "SAINT CHARLES COUNTY": "29183", "ST CHARLES COUNTY": "29183" };
@@ -148,10 +149,9 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       raw: { ...rawOf(x.r), ...(x.rows.length > 1 ? { _source_rows: x.rows.length, _apns: x.apns, _merged_rows: x.rows.slice(1).map((y: any) => rawOf(y.r)) } : {}) } })),
       { onConflict: "property_id,pull_id" });
     // list lifespan: which of these properties were already on THIS list in an earlier pull
-    const seenOnList = new Set<string>(); let lastListPull: any = null;
+    const seenOnList = new Set<string>();
     if (profileId) {
       for (const r of await inChunks(props.map((x) => x.pid), 150, (part) => select("property_profiles", { profile_id: `eq.${profileId}`, property_id: `in.(${part.join(",")})`, voided_at: "is.null", select: "property_id,first_pull_id" }))) if (r.first_pull_id !== pullId) seenOnList.add(r.property_id);
-      lastListPull = (await select("pull_tasks", { profile_id: `eq.${profileId}`, zip_group: `eq.${pt.zip_group}`, status: "eq.processed", order: "completed_date.desc", select: "pull_id,completed_date" }))[0];
     }
     if (profileId) {
       // a link left by a voided run is taken over by this pull
@@ -332,15 +332,37 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       new_numbers_for_outreach: uniq(fresh), pct_new_for_outreach: pctOf(uniq(fresh)),
     };
 
-    // refresh rate -> when to pull this list again
+    // smart recycling: compare with the previous CONFIRMED pull of the same list (same DataSift profile + ZIP group)
     const newToList = props.filter((x) => !seenOnList.has(x.pid)).length;
     const freshShare = props.length ? newToList / props.length : 1;
-    let nextDays = 30, refreshNote = "First pull of this list. Pull it again in 30 days to measure how fast it refreshes.";
-    if (lastListPull && seenOnList.size > 0) {
-      const gap = Math.max(7, (Date.now() - Date.parse(lastListPull.completed_date)) / 864e5);
-      const perMonth = (freshShare * 30) / Math.max(gap, 30);  // never extrapolate up from a short gap
-      nextDays = perMonth >= 0.5 ? 30 : perMonth >= 0.25 ? 60 : perMonth >= 0.1 ? 90 : 180;
-      refreshNote = `${Math.round(freshShare * 100)}% of this list was new after ${Math.round(gap)} days (about ${Math.round(perMonth * 100)}% a month), so next pull in ${nextDays} days.`;
+    let recycle: any = null;
+    let nextDays = NO_DATA_INTERVAL, refreshNote = "First pull of this list. Pull it again in 30 days to measure how fast it refreshes.";
+    if (profileId) {
+      const prev = (await select("list_pulls", { profile_id: `eq.${profileId}`, zip_group: `eq.${pt.zip_group || "ALL"}`, pull_id: `neq.${pullId}`, order: "uploaded_at.desc", limit: "1",
+        select: "pull_id,uploaded_at" }))[0];
+      if (prev) {
+        const prevRows = await select("property_pulls", { pull_id: `eq.${prev.pull_id}`, voided_at: "is.null", select: "property_id,raw" });
+        const prevBy = new Map(prevRows.map((r: any) => [r.property_id, r.raw || {}]));
+        const curIds = new Set(props.map((x) => x.pid));
+        const phonesOf = (r: any) => Array.from(new Set([1, 2, 3, 4, 5].map((i) => String(r?.[`Phone ${i}`] ?? "").replace(/\D/g, "").slice(-10)).filter((d) => d.length === 10))).sort().join(",");
+        let remained = 0, ownerChanged = 0, phonesChanged = 0;
+        for (const x of props) { const b: any = prevBy.get(x.pid); if (!b) continue; remained++;
+          if (clean(b["Owner 1 Last Name"]) !== clean(x.r["Owner 1 Last Name"]) || clean(b["Mailing Address"]) !== clean(x.r["Mailing Address"])) ownerChanged++;
+          if (phonesOf(b) !== phonesOf(x.r)) phonesChanged++; }
+        const added = props.length - remained, dropped = prevRows.filter((r: any) => !curIds.has(r.property_id)).length;
+        const days = Math.round((Date.now() - Date.parse(prev.uploaded_at)) / 864e5);
+        const refresh = props.length ? added / props.length : 0;
+        const past = await select("recycle_stats", { profile_id: `eq.${profileId}`, zip_group: `eq.${pt.zip_group || "ALL"}`, order: "uploaded_at.desc", select: "cur_props,added,days_between" });
+        const learned = learn([perMonthOf(refresh, days), ...past.map((r: any) => perMonthOf(r.cur_props ? r.added / r.cur_props : 0, Number(r.days_between) || 0))]);
+        nextDays = intervalFor(learned);
+        recycle = { prev_pull_id: prev.pull_id, days_between: days, prev_properties: prevRows.length, properties: props.length, remained, added, dropped,
+          owner_changed: ownerChanged, phones_changed: phonesChanged, refresh_pct: Math.round(refresh * 1000) / 10,
+          growth_pct: prevRows.length ? Math.round(((props.length - prevRows.length) / prevRows.length) * 1000) / 10 : null,
+          refresh_per_month_pct: Math.round(perMonthOf(refresh, days) * 1000) / 10, learned_per_month_pct: learned == null ? null : Math.round(learned * 1000) / 10,
+          measurements: past.length + 1, interval_days: nextDays };
+        refreshNote = `${recycle.refresh_pct}% of this list is new since the pull ${days} days ago (${added.toLocaleString()} added, ${dropped.toLocaleString()} dropped, size ${recycle.growth_pct ?? 0}%). `
+          + `Learned refresh about ${recycle.learned_per_month_pct}% a month over ${recycle.measurements} re-pull${recycle.measurements === 1 ? "" : "s"}, so next pull in ${nextDays} days.`;
+      }
     }
     const nextDate = new Date(Date.now() + nextDays * 864e5).toISOString().slice(0, 10);
 
@@ -371,7 +393,7 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       import_rows_new: outImp.length - dupRows, import_rows_duplicates: dupRows, import_rows_may_create_second_contact: trapRows,
       properties_new_to_list: newToList, properties_already_on_list: props.length - newToList, pct_new_to_list: Math.round(freshShare * 1000) / 10,
       pct_already_known: props.length ? Math.round((props.filter((x) => !x.wasNew).length / props.length) * 1000) / 10 : 0,
-      refresh_note: profileId ? refreshNote : "", next_pull_date: profileId ? nextDate : null, zip_distribution: zipDist };
+      refresh_note: profileId ? refreshNote : "", next_pull_date: profileId ? nextDate : null, recycle, zip_distribution: zipDist };
 
     const out = XLSX.utils.book_new();
     const add = (name: string, data: any[]) => XLSX.utils.book_append_sheet(out, data.length ? XLSX.utils.json_to_sheet(data) : XLSX.utils.aoa_to_sheet([["(none)"]]), name);

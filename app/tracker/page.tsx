@@ -2,6 +2,9 @@ import Nav from "../nav";
 import { select } from "@/lib/sb";
 import SyncButton from "./sync";
 import Lifecycle from "./lifecycle";
+import { RecyclingTable } from "../recycling";
+import ZipCoverage from "../zipcoverage";
+import { loadRecycling } from "@/lib/recycling";
 import type { By } from "@/lib/lifecycle";
 import { marketShort } from "@/lib/lists";
 export const dynamic = "force-dynamic";
@@ -37,6 +40,9 @@ export default async function Tracker({ searchParams }: { searchParams: { by?: s
   const srcName = new Map(sources.map((s: any) => [s.source_id, s.name]));
   const pullProv = new Map(ups.map((u: any) => [u.pull_id, u.skip_trace_provider || "Unknown"]));
   const pullSrc = new Map(ups.map((u: any) => [u.pull_id, srcName.get(u.original_source_id) || u.original_source_id || "Unknown"]));
+  const recycling = await loadRecycling();
+  const recNames = new Map(Array.from(recycling.values()).map((R) => { const pr: any = profiles.find((p: any) => p.profile_id === R.profileId);
+    return [R.key, `${pr?.name || R.profileId} (${marketShort(R.market)})${R.zipGroup !== "ALL" ? ` · ZIP group ${R.zipGroup}` : ""}`]; }));
   const bPull = new Map(batches.map((b: any) => [b.batch_id, b.pull_id]));
   exported = exported.filter((e: any) => bPull.has(e.batch_id));  // only confirmed, not voided exports count
   const tk = new Map(tasks.map((t: any) => [t.pull_id, t])); const pf = new Map(profiles.map((p: any) => [p.profile_id, p]));
@@ -71,17 +77,6 @@ export default async function Tracker({ searchParams }: { searchParams: { by?: s
   const dsByList = new Map(profiles.map((p: any) => [`${p.name} (${marketShort(p.market_fips)})`, p.doors_per_deal]));
   const t = all.ev.contacted.size, q = all.ev.qualified.size;
   const city = markets.find((m: any) => m.fips === "29510");
-  // list lifespan: how much of each list is new every time we pull it again
-  const life = new Map<string, any>();
-  for (const b of batches as any[]) {
-    const tsk: any = tk.get(b.pull_id); if (!tsk?.profile_id) continue; const pr: any = pf.get(tsk.profile_id);
-    const key = `${pr?.name} (${marketShort(tsk.market_fips)})${tsk.zip_group && tsk.zip_group !== "ALL" ? ` · ZIP group ${tsk.zip_group}` : ""}`;
-    const L = life.get(key) || { pulls: 0, repulls: [] as number[], last: "", lastPct: null, profile: tsk.profile_id, group: tsk.zip_group };
-    L.pulls++; L.last = (b.created_at || "").slice(0, 10); L.lastPct = b.counts?.pct_new_to_list ?? null;
-    if (L.pulls > 1 && b.counts?.pct_new_to_list != null) L.repulls.push(b.counts.pct_new_to_list);
-    life.set(key, L);
-  }
-  const nextPlanned = (pid: string, g: string) => (tasks as any[]).filter((x) => x.profile_id === pid && x.zip_group === g && x.status === "planned").map((x) => x.planned_date).sort()[0] || "";
 
   return (<>
     <Nav on="Tracker" />
@@ -116,13 +111,8 @@ export default async function Tracker({ searchParams }: { searchParams: { by?: s
       <div><b>Contracts and closed deals</b> happen in TJ Capital, so they show once that account is connected (read only).</div>
       <div className="muted" style={{ marginTop: 6 }}>Results refresh every night. {city?.notes?.match(/Last GHL sync[^,]*/)?.[0] || ""}</div></div>
       <SyncButton /></div></div>
-    <h2>List lifespan</h2>
-    <p className="sub">Each time a list is pulled again, how much of it is new to that list. Lists that barely change get pulled less often; the calendar adjusts by itself (30, 60, 90 or 180 days).</p>
-    <div className="tablewrap"><table><thead><tr><th>List</th><th>Times pulled</th><th>Last pulled</th><th>% new on last pull</th><th>Avg % new on re-pulls</th><th>Next pull</th></tr></thead><tbody>
-      {Array.from(life.entries()).map(([k, L]) => <tr key={k}><td>{k}</td><td>{L.pulls}</td><td>{L.last}</td><td>{L.pulls > 1 && L.lastPct != null ? `${L.lastPct}%` : "first pull"}</td>
-        <td>{L.repulls.length ? `${(L.repulls.reduce((a: number, b: number) => a + b, 0) / L.repulls.length).toFixed(1)}%` : "–"}</td><td>{nextPlanned(L.profile, L.group)}</td></tr>)}
-      {!life.size && <tr><td colSpan={6} className="muted">Shows up after the first pull from the calendar.</td></tr>}
-    </tbody></table></div>
+    <RecyclingTable rows={Array.from(recycling.values()).sort((x, y) => x.nextDate.localeCompare(y.nextDate))} names={recNames} />
+    <ZipCoverage />
     <Table title="By market" rows={sort(byM)} label="Market" />
     <Table title="By original source" rows={sort(byS)} label="Where the list came from" />
     <Table title="By list" rows={sort(byL)} label="List" extra={(k) => dsByList.get(k) ?? ""} />
