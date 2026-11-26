@@ -4,7 +4,7 @@ import { STORAGE } from "@/lib/sb";
 // Real files can't match: real pull ids start with "P-" and real uploads keep their PropStream file names.
 const h = () => ({ apikey: process.env.SUPABASE_SERVICE_KEY!, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`, "Content-Type": "application/json" });
 async function list(bucket: string, prefix: string) {
-  const r = await fetch(`${STORAGE}/object/list/${bucket}`, { method: "POST", headers: h(), body: JSON.stringify({ prefix, search: prefix ? "" : "ZZTEST", limit: 1000 }) });
+  const r = await fetch(`${STORAGE}/object/list/${bucket}`, { method: "POST", headers: h(), body: JSON.stringify({ prefix, limit: 1000 }) });
   return r.ok ? ((await r.json()) as any[]) : [];
 }
 export async function POST() {
