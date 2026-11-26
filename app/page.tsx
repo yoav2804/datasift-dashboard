@@ -5,6 +5,7 @@ import { loadLists, today, weekStart, addDays, fmt, fmtLong, marketShort, daysBe
 import { History, LastPulled, StatePill } from "./history";
 import Planner from "./planner";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const isDate = (s?: string) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
 const zipText = (t: any) => t.zip_group === "ALL" || !t.zip_group ? "All ZIPs" : t.zips?.length ? `ZIP group ${t.zip_group}: ${t.zips.join(", ")}` : `ZIP group ${t.zip_group}: all other ZIPs`;
