@@ -22,6 +22,7 @@ create table if not exists message_events (
   primary key (platform, message_id)
 );
 create index if not exists message_events_phone on message_events (phone);
+alter table message_events enable row level security;   -- only the server (service key) reads it
 
 -- 3. called after every GHL sync: confirm imports. Evidence only:
 --    a number counts as imported when it is on a GHL contact created after the export (1 day of slack for time zones).
@@ -47,16 +48,16 @@ begin
 end $$;
 
 -- 4. counts per export batch, so pages don't load every row
-create or replace view export_bucket_counts as
+create or replace view export_bucket_counts with (security_invoker = on) as
   select batch_id, bucket, count(distinct phone) as phones, count(distinct property_id) as props,
          count(distinct phone) filter (where imported_at is not null) as imported_phones,
          count(distinct property_id) filter (where imported_at is not null) as imported_props
   from export_rows group by batch_id, bucket;
-create or replace view export_excluded_reasons as
+create or replace view export_excluded_reasons with (security_invoker = on) as
   select batch_id, case when reason like 'non-residential%' then 'non-residential' else reason end as reason, count(distinct phone) as phones
   from export_rows where bucket = 'excluded' group by 1, 2;
 -- messages to numbers we exported, per batch (empty until a platform's messages are synced)
-create or replace view message_counts_by_batch as
+create or replace view message_counts_by_batch with (security_invoker = on) as
   select r.batch_id,
          count(distinct m.phone) filter (where m.direction = 'outbound') as numbers_messaged,
          count(*) filter (where m.direction = 'outbound') as messages_sent,
