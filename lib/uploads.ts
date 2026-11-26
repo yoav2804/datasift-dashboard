@@ -1,6 +1,17 @@
 // Draft -> confirmed / voided. Supabase only, never GHL.
 // Nothing is deleted: undone rows get voided_at (or status "voided") and every page ignores them.
-import { select, upsert, update } from "./sb";
+import { select, upsert, update, rpc } from "./sb";
+
+// Correct a CONFIRMED upload's list: re-labels its pull, list links, results and review cases (database function swap_pull_data).
+// If the target pull already has a confirmed upload, the two swap. Nothing is deleted, nothing is exported again,
+// and numbers that were already sent stay "already in texting". Every correction is written to upload_corrections.
+export async function reassignUpload(uploadId: string, toPull: string, reason: string) {
+  if (!/^[0-9a-f-]{36}$/i.test(uploadId || "")) throw new Error("Bad upload id.");
+  if (!reason || reason.trim().length < 3) throw new Error("Write a short reason for the audit history.");
+  const [u] = await select("uploads", { upload_id: `eq.${uploadId}`, select: "upload_id,pull_id,status" });
+  if (!u || u.status !== "confirmed") throw new Error("Only a confirmed upload can be reassigned here (use Undo for drafts).");
+  return rpc("swap_pull_data", { a: u.pull_id, b: toPull, p_reason: reason.trim() });
+}
 
 // Mark everything one pull wrote as voided, so it stops counting anywhere.
 // Only rows this pull CREATED carry its pull_id, so links that existed before are not touched.
