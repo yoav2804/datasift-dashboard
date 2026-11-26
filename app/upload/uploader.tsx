@@ -2,9 +2,10 @@
 import { useState } from "react";
 import DraftActions from "./draftactions";
 import { SKIP_TRACE_PROVIDERS } from "@/lib/providers";
-const LABELS: [string, string][] = [["rows_in_file", "Rows in file"], ["net_new_properties", "New properties"], ["already_known_properties", "Already known"],
-  ["import_rows", "GHL import rows"], ["import_rows_new", "New contacts"], ["import_rows_duplicates", "Duplicates (included)"], ["import_rows_may_create_second_contact", "May create 2nd contact"],
-  ["already_in_ghl", "Numbers already in GHL"], ["multi_property_review", "Multi-property"],
+const LABELS: [string, string][] = [["unique_properties", "Properties"], ["net_new_properties", "New to us"], ["total_phone_entries", "Phone numbers (all)"], ["unique_phone_numbers", "Unique numbers"],
+  ["new_numbers_for_outreach", "New numbers for outreach"], ["import_rows", "Export rows (properties)"], ["numbers_already_in_texting", "Already in texting (left out)"],
+  ["numbers_on_2plus_properties_in_list", "Repeated in this list"], ["numbers_already_in_our_database", "Already in our database"], ["numbers_shared_with_other_property", "Shared with another property"],
+  ["numbers_shared_same_owner", "…same owner"], ["numbers_shared_different_owner", "…different owner"],
   ["landlines", "Landlines removed"], ["non_residential_numbers", "Non-residential removed"], ["litigator_numbers", "Litigator removed"]];
 export default function Uploader({ options, preset, sources, pullSource }: { options: { id: string; label: string }[]; preset: string;
   sources: { id: string; name: string }[]; pullSource: Record<string, string> }) {
@@ -45,7 +46,8 @@ export default function Uploader({ options, preset, sources, pullSource }: { opt
         <p className="sub" style={{ marginBottom: 12 }}>Under: <b>{options.find((o) => o.id === rep.pull_id)?.label || rep.pull_id}</b> · source <b>{srcOf(rep.source_id)}</b> · skip traced by <b>{rep.skip_trace_provider}</b>. Nothing counts yet. Check it, then confirm the export, or undo if this went under the wrong list.</p>
         {rep.warnings?.length > 0 && <div className="err" style={{ marginBottom: 12 }}><b>Check this before confirming:</b><ul style={{ margin: "6px 0 0", paddingLeft: 20 }}>{rep.warnings.map((w: string) => <li key={w}>{w}</li>)}</ul></div>}
         <div className="card" style={{ background: "var(--bg)" }}>
-          <div><b>Duplicates:</b> {rep.already_known_properties} of {rep.unique_properties} properties ({rep.pct_already_known}%) were already in our database. {rep.import_rows_duplicates} of {rep.import_rows} CSV rows are duplicates.</div>
+          <div><b>Properties:</b> {rep.already_known_properties} of {rep.unique_properties} ({rep.pct_already_known}%) were already in our database.</div>
+          {rep.unique_phone_numbers != null && <div style={{ marginTop: 6 }}><b>Numbers:</b> {rep.pct_new_for_outreach}% new for outreach · {rep.pct_numbers_already_in_texting}% already in texting (left out) · {rep.pct_numbers_duplicated_in_list}% repeated in this list · {rep.pct_numbers_shared_with_other_property}% shared with another property.</div>}
           {rep.refresh_note && <div style={{ marginTop: 6 }}><b>List freshness:</b> {rep.pct_new_to_list}% new to this list. {rep.refresh_note} {rep.next_pull_date && <>Next pull: <b>{rep.next_pull_date}</b>.</>}</div>}
         </div>
         <div className="grid">{LABELS.map(([k, l]) => <div className="stat" key={k}><div className="big">{rep[k] ?? 0}</div><div className="muted">{l}</div></div>)}</div>

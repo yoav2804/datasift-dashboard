@@ -26,4 +26,5 @@ delete from phones ph where ph.phone like '+1314555010%'
   and not exists (select 1 from property_phones pp where pp.phone = ph.phone);
 delete from pull_tasks        where pull_id like 'ZZTEST-%';
 delete from profiles          where profile_id in ('ZZTEST-A', 'ZZTEST-B');
+delete from ghl_contacts      where contact_id like 'ZZTEST%';   -- fake GHL contacts used to test 'already in texting' (phones cascade)
 commit;

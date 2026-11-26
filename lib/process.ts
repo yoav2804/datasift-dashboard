@@ -175,11 +175,11 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     await upsert("property_owners", props.flatMap((x) => x.rows.map((y: any) => ({ property_id: x.pid, owner_id: oid.get(y.okey), first_pull_id: pullId, last_seen_at: NOW }))), { onConflict: "property_id,owner_id" });
 
     // ---------- phones ----------
-    const items: any[] = [], excluded: any[] = [];
+    const items: any[] = [], excluded: any[] = []; let rawPhones = 0;
     for (const x of props) { const here = new Set<string>(); for (const y of x.rows) {
       const r = y.r; const lit = x.rows.some((z: any) => String(z.r["Litigator"] || "").toLowerCase() === "yes");
       for (let s = 1; s <= 5; s++) {
-        const raw = r[`Phone ${s}`]; if (!raw) continue;
+        const raw = r[`Phone ${s}`]; if (!raw) continue; rawPhones++;
         const n = norm(raw); const base = { x, okey: y.okey, slot: s, raw, phone: n, type: r[`Phone ${s} Type`], dnc: !!r[`Phone ${s} DNC`], lit };
         if (!n) { excluded.push({ ...base, reason: "invalid number" }); continue; }
         if (here.has(n)) continue;
@@ -204,24 +204,40 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     const batchProps = new Map<string, Set<string>>();
     for (const i of items) { if (!batchProps.has(i.phone)) batchProps.set(i.phone, new Set()); batchProps.get(i.phone)!.add(i.x.pid); }
 
-    const fresh: any[] = [], existingL: any[] = [], review: any[] = [], held: any[] = [];
+    // numbers that already entered our texting operation: in GHL, or sent in an earlier confirmed export
+    const texted = new Map<string, Set<string>>();
+    for (const r of await inChunks(allp, 150, (part) => select("export_rows", { phone: `in.(${part.join(",")})`, bucket: "in.(new,existing,review)",
+      select: "phone,property_id,export_batches!inner(approved,voided_at)", "export_batches.approved": "eq.true", "export_batches.voided_at": "is.null" }))) {
+      if (!texted.has(r.phone)) texted.set(r.phone, new Set()); if (r.property_id) texted.get(r.phone)!.add(r.property_id);
+    }
+
+    // Every valid number gets exactly one outreach status, plus a "shared" note when it is also linked to another property.
+    //   new         -> goes to the outreach export
+    //   in_texting  -> already in GHL or already sent: excluded, so nobody gets texted twice
+    //   dup_in_list -> same number on an earlier property in this file: sent once, with the first property
+    // Shared numbers are logged automatically (no manual review) as same owner / different owner / unknown.
+    const fresh: any[] = [], existingL: any[] = [], dupL: any[] = [], review: any[] = [], held: any[] = [];
+    const keeper = new Map<string, string>();   // phone -> the property in this file that sends it
     for (const i of items) {
       const x = i.x, p = i.phone;
       if (!isResidential(x.r["Property Type"])) { excluded.push({ ...i, reason: `non-residential (${x.r["Property Type"]})` }); continue; }
       if (i.lit) { excluded.push({ ...i, reason: "litigator flag on owner" }); continue; }
       if (String(i.type || "").toLowerCase() === "landline") { excluded.push({ ...i, reason: "landline" }); continue; }
-      if (ghl.has(p)) {
-        const cs = ghl.get(p)!.map((c) => gc.get(c)).filter(Boolean);
-        const same = cs.filter((c) => !c.raw?.address1 || street(c.raw.address1) === street(x.r["Address"]));
-        if (same.length) { existingL.push({ ...i, ghl: same[0] }); continue; }
-        review.push({ ...i, reason: "in_ghl_other_property", ghl: cs[0] }); continue;
-      }
-      const otherHist = (hist.get(p) || []).filter((h) => h.property_id !== x.pid);
-      const sameHist = (hist.get(p) || []).filter((h) => h.property_id === x.pid && h.first_pull_id !== pullId);
-      if (sameHist.length && !otherHist.length) { existingL.push({ ...i, ghl: null, priorPull: sameHist[0].first_pull_id }); continue; }
-      if (otherHist.length) { review.push({ ...i, reason: "shared_in_history", other: otherHist }); continue; }
-      if (batchProps.get(p)!.size > 1) { review.push({ ...i, reason: "shared_in_batch" }); continue; }
-      fresh.push(i);
+      const cs = (ghl.get(p) || []).map((c) => gc.get(c)).filter(Boolean);
+      const ghlOther = cs.filter((c) => c.raw?.address1 && street(c.raw.address1) !== street(x.r["Address"]));
+      const ghlSame = cs.filter((c) => !c.raw?.address1 || street(c.raw.address1) === street(x.r["Address"]));
+      const otherHist = (hist.get(p) || []).filter((h) => h.property_id !== x.pid && h.first_pull_id !== pullId);
+      const otherTexted = Array.from(texted.get(p) || []).filter((q) => q !== x.pid);
+      const otherFile = Array.from(batchProps.get(p)!).filter((q) => q !== x.pid);
+      i.inDb = (hist.get(p) || []).some((h) => h.first_pull_id !== pullId);
+      i.ghl = ghlSame[0] || cs[0] || null;
+      if (ghlOther.length && !ghlSame.length) i.shared = { reason: "in_ghl_other_property", ghl: ghlOther[0] };
+      else if (otherHist.length || otherTexted.length) i.shared = { reason: "shared_in_history", other: otherHist.length ? otherHist : otherTexted.map((q) => ({ property_id: q })) };
+      else if (otherFile.length) i.shared = { reason: "shared_in_batch" };
+      if (cs.length || texted.has(p)) { i.where = cs.length ? "in GHL" : "sent in an earlier export"; existingL.push(i); }
+      else if (keeper.has(p) && keeper.get(p) !== x.pid) dupL.push(i);
+      else { keeper.set(p, x.pid); fresh.push(i); }
+      if (i.shared) review.push(Object.assign(i, { reason: i.shared.reason, other: i.shared.other, ghlOther: i.shared.ghl }));
     }
 
     // property-phone links: new ones are inserted; a link left by a voided run is taken over by this pull
@@ -234,32 +250,39 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     await upsert("property_phones", items.filter((i) => !isVoidedLink(i)).map(linkRow), { onConflict: "property_id,phone", ignore: true });
 
     const pidX = new Map(props.map((x) => [x.pid, x]));
-    const histAddr = new Map<string, string>();
-    const histIds = Array.from(new Set(review.flatMap((i) => (i.other || []).map((o: any) => o.property_id))));
+    const histAddr = new Map<string, string>(), histOwner = new Map<string, any[]>();
+    const histIds = Array.from(new Set(review.flatMap((i) => (i.other || []).map((o: any) => o.property_id)))) as string[];
     for (const p of await inChunks(histIds, 100, (part) => select("properties", { property_id: `in.(${part.join(",")})`, select: "property_id,address,city,zip" })))
       histAddr.set(p.property_id, `${p.address}, ${p.city} ${p.zip}`);
+    for (const o of await inChunks(histIds, 100, (part) => select("property_owners", { property_id: `in.(${part.join(",")})`, select: "property_id,owners(owner1_last,mailing_address)" })))
+      histOwner.set(o.property_id, [...(histOwner.get(o.property_id) || []), o.owners]);
     for (const i of review) {
-      const a = i.x.r;
+      const a = i.x.r, last = clean(a["Owner 1 Last Name"]), mail = clean(a["Mailing Address"]);
       if (i.reason === "in_ghl_other_property") {
-        const g = i.ghl.raw || {};
-        i.nameMatch = !!clean(g.lastName) && clean(g.lastName) === clean(a["Owner 1 Last Name"]); i.mailMatch = null; i.otherAddr = g.address || "";
+        const g = i.ghlOther?.raw || {}; i.ghl = i.ghlOther;
+        i.nameMatch = clean(g.lastName) && last ? clean(g.lastName) === last : null; i.mailMatch = null; i.otherAddr = g.address1 || g.address || "";
       } else if (i.reason === "shared_in_history") {
-        i.otherAddr = histAddr.get(i.other[0].property_id) || ""; i.nameMatch = null; i.mailMatch = null;
+        const op = i.other[0].property_id; const os = histOwner.get(op) || [];
+        i.otherAddr = histAddr.get(op) || "";
+        i.nameMatch = os.length && last ? os.some((o: any) => clean(o?.owner1_last) === last) : null;
+        i.mailMatch = os.length && mail ? os.some((o: any) => clean(o?.mailing_address) === mail) : null;
       } else {
         const o = Array.from(batchProps.get(i.phone)!).filter((q) => q !== i.x.pid).map((q) => pidX.get(q)).filter(Boolean)[0];
-        i.nameMatch = o ? clean(a["Owner 1 Last Name"]) === clean(o.r["Owner 1 Last Name"]) : null;
-        i.mailMatch = o ? clean(a["Mailing Address"]) === clean(o.r["Mailing Address"]) : null; i.otherAddr = o?.r["Address"] || "";
+        i.nameMatch = o && last ? last === clean(o.r["Owner 1 Last Name"]) : null;
+        i.mailMatch = o && mail ? mail === clean(o.r["Mailing Address"]) : null; i.otherAddr = o?.r["Address"] || "";
       }
+      // same owner = legitimate multi-property ownership; different owner = the number may be wrong for one of them
+      i.relation = i.nameMatch || i.mailMatch ? "same_owner" : i.nameMatch === false && i.mailMatch !== true ? "different_owner" : "unknown";
     }
     // review cases: new ones are inserted; a case left by a voided run is reopened for this pull
     const voidedCases = new Set<string>();
     for (const r of await inChunks(Array.from(new Set(review.map((i) => i.x.pid))) as string[], 150, (part) => select("review_cases", { new_property_id: `in.(${part.join(",")})`, status: "eq.voided", select: "phone,new_property_id" })))
       voidedCases.add(`${r.phone}|${r.new_property_id}`);
     const caseRow = (i: any) => ({ phone: i.phone, reason: i.reason, ghl_contact_id: i.ghl?.contact_id || null, new_property_id: i.x.pid,
-      owner_name_match: i.nameMatch, mailing_match: i.mailMatch, pull_id: pullId, original_property_id: i.other?.[0]?.property_id || null,
+      owner_name_match: i.nameMatch, mailing_match: i.mailMatch, owner_relation: i.relation, status: "logged", pull_id: pullId, original_property_id: i.other?.[0]?.property_id || null,
       notes: i.otherAddr ? `Other property: ${i.otherAddr}` : null });
     const isVoidedCase = (i: any) => voidedCases.has(`${i.phone}|${i.x.pid}`);
-    await upsert("review_cases", review.filter(isVoidedCase).map((i) => ({ ...caseRow(i), status: "open", decided_at: null })), { onConflict: "phone,new_property_id" });
+    await upsert("review_cases", review.filter(isVoidedCase).map((i) => ({ ...caseRow(i), status: "logged", decided_at: null })), { onConflict: "phone,new_property_id" });
     await upsert("review_cases", review.filter((i) => !isVoidedCase(i)).map(caseRow), { onConflict: "phone,new_property_id", ignore: true });
 
     // ---------- outputs ----------
@@ -267,38 +290,47 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       Owner: [r["Owner 1 First Name"], r["Owner 1 Last Name"]].filter(Boolean).join(" "),
       Mailing: [r["Mailing Address"], r["Mailing City"], r["Mailing State"], z5(r["Mailing Zip"])].filter(Boolean).join(" "),
       Phone: i.phone || i.raw, Type: i.type, Slot: i.slot, "PropStream DNC": i.dnc ? "Yes" : "", "Property New To Us": i.x.wasNew ? "Yes" : "No" }; };
-    const WHY: any = { in_ghl_other_property: "Number already in GHL on a different property", shared_in_history: "Number seen before on a different property", shared_in_batch: "Same number on 2+ properties in this file" };
+    const WHY: any = { in_ghl_other_property: "Number in GHL on a different property", shared_in_history: "Number linked before to a different property", shared_in_batch: "Same number on 2+ properties in this file" };
+    const REL: any = { same_owner: "Same owner (multi-property)", different_owner: "Different owner: number may be wrong", unknown: "Unknown" };
     const outNew = fresh.map(base);
-    const outExist = existingL.map((i) => ({ ...base(i), Where: i.ghl ? "In GHL" : `Already in our database (pull ${i.priorPull}), not in GHL yet`,
-      "GHL Contact ID": i.ghl?.contact_id || "", "GHL Name": i.ghl?.name || "", "GHL DND": i.ghl ? (i.ghl.dnd ? "Yes" : "No") : "", "In GHL Since": (i.ghl?.date_added || "").slice(0, 10) }));
-    const outRev = review.map((i) => ({ ...base(i), Why: WHY[i.reason], "Other Property": i.otherAddr || "", "GHL Contact ID": i.ghl?.contact_id || "",
-      "First In GHL": (i.ghl?.date_added || "").slice(0, 10), "Same Owner Last Name": i.nameMatch === null ? "" : i.nameMatch ? "Yes" : "No",
-      "Same Mailing Address": i.mailMatch === null || i.mailMatch === undefined ? "" : i.mailMatch ? "Yes" : "No" }));
+    const outExist = existingL.map((i) => ({ ...base(i), Where: i.where, "GHL Contact ID": i.ghl?.contact_id || "", "GHL Name": i.ghl?.name || "",
+      "GHL DND": i.ghl ? (i.ghl.dnd ? "Yes" : "No") : "", "In GHL Since": (i.ghl?.date_added || "").slice(0, 10) }));
+    const outDup = dupL.map((i) => ({ ...base(i), "Sent With Property": pidX.get(keeper.get(i.phone)!)?.r["Address"] || "" }));
+    const outRev = review.map((i) => ({ ...base(i), "Outreach Status": fresh.includes(i) ? "Sent (new)" : dupL.includes(i) ? "Sent with another property in this list" : "Excluded: already in texting",
+      Why: WHY[i.reason], Owner: REL[i.relation], "Other Property": i.otherAddr || "", "GHL Contact ID": i.ghl?.contact_id || "",
+      "Same Owner Last Name": i.nameMatch === null ? "" : i.nameMatch ? "Yes" : "No", "Same Mailing Address": i.mailMatch == null ? "" : i.mailMatch ? "Yes" : "No" }));
     const outExc = excluded.map((i) => ({ ...base(i), Reason: i.reason }));
     const outHeld = held.map((i) => ({ ...base(i), Reason: i.reason }));
 
-    // import file: new numbers AND duplicates (GHL decides on import). Each phone keeps its status.
+    // outreach export: only numbers that never entered our texting operation, each number once
     const imp = new Map<string, any[]>();
-    const status = (i: any, s: string) => ({ ...i, st: s });
-    for (const i of [...fresh.map((i) => status(i, "new")), ...existingL.map((i) => status(i, i.ghl ? "in_ghl" : "seen_before")), ...review.map((i) => status(i, "review"))])
-      imp.set(i.x.pid, [...(imp.get(i.x.pid) || []), i]);
-    let dupRows = 0, trapRows = 0;
+    for (const i of fresh) imp.set(i.x.pid, [...(imp.get(i.x.pid) || []), i]);
+    const dupRows = 0, trapRows = 0;
     const outImp: any[] = [];
     imp.forEach((ph0, pid) => {
       const r = ph0[0].x.r;
-      // a number GHL already has as a main Phone goes first, so GHL matches the existing contact instead of creating a duplicate
-      const ph = ph0.sort((a, b) => (ghlMain.has(b.phone) ? 1 : 0) - (ghlMain.has(a.phone) ? 1 : 0) || a.slot - b.slot).slice(0, 4);
-      const isDup = ph.some((q) => q.st !== "new");
-      const trap = ph.some((q) => ghl.has(q.phone)) && !ghlMain.has(ph[0].phone);
-      if (isDup) dupRows++; if (trap) trapRows++;
-      const row: any = { "First Name": r["Owner 1 First Name"] || "", "Last Name": r["Owner 1 Last Name"] || "", Phone: ph[0].phone, "Phone Type": ph[0].type,
+      const ph = ph0.sort((a, b) => a.slot - b.slot).slice(0, 4);
+      outImp.push({ "First Name": r["Owner 1 First Name"] || "", "Last Name": r["Owner 1 Last Name"] || "", Phone: ph[0].phone, "Phone Type": ph[0].type,
         "Phone 2": ph[1]?.phone || "", "Phone 2 Type": ph[1]?.type || "", "Phone 3": ph[2]?.phone || "", "Phone 3 Type": ph[2]?.type || "", "Phone 4": ph[3]?.phone || "", "Phone 4 Type": ph[3]?.type || "",
         Address: r["Address"], City: r["City"], State: r["State"], "Postal Code": z5(r["Zip"]),
         "Property Address For AI": `${r["Address"]}, ${r["City"]}, ${r["State"]} ${z5(r["Zip"])}`,
         "DS Property ID": pid, "DS Pull ID": pullId, "DS Profile": profileId || "", "DS ZIP Group": pt.zip_group || "", "DS Market": ph0[0].x.market || "",
-        "DS Status": !isDup ? "New" : trap ? "Duplicate: GHL may create a 2nd contact" : ph.some((q) => q.st === "in_ghl") ? "Duplicate: already in GHL" : ph.some((q) => q.st === "review") ? "Duplicate: multi-property" : "Duplicate: seen in earlier pull" };
-      outImp.push(row);
+        "DS Skip Trace": skipTrace, "DS Source": sourceId, "DS Status": "New" });
     });
+    const uniq = (arr: any[]) => new Set(arr.map((i) => i.phone)).size;
+    const pctOf = (a: number) => (allp.length ? Math.round((a / allp.length) * 1000) / 10 : 0);
+    const dupInListNumbers = Array.from(batchProps.values()).filter((v) => v.size > 1).length;
+    const phoneStats = {
+      total_phone_entries: rawPhones, unique_phone_numbers: allp.length,
+      numbers_on_2plus_properties_in_list: dupInListNumbers, pct_numbers_duplicated_in_list: pctOf(dupInListNumbers),
+      numbers_already_in_our_database: allp.filter((p) => (hist.get(p) || []).some((h) => h.first_pull_id !== pullId)).length,
+      numbers_already_in_texting: uniq(existingL), pct_numbers_already_in_texting: pctOf(uniq(existingL)),
+      numbers_shared_with_other_property: uniq(review), pct_numbers_shared_with_other_property: pctOf(uniq(review)),
+      numbers_shared_same_owner: uniq(review.filter((i) => i.relation === "same_owner")),
+      numbers_shared_different_owner: uniq(review.filter((i) => i.relation === "different_owner")),
+      numbers_excluded_landline_litigator_nonres: uniq(excluded.filter((e) => e.phone)),
+      new_numbers_for_outreach: uniq(fresh), pct_new_for_outreach: pctOf(uniq(fresh)),
+    };
 
     // refresh rate -> when to pull this list again
     const newToList = props.filter((x) => !seenOnList.has(x.pid)).length;
@@ -334,8 +366,8 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
       properties_with_any_phone: new Set(items.map((i) => i.x.pid)).size, unique_valid_phones: allp.length, property_phone_pairs: items.length,
       invalid_numbers: excluded.filter((e) => e.reason === "invalid number").length, landlines: excluded.filter((e) => e.reason === "landline").length,
       litigator_numbers: excluded.filter((e) => e.reason.startsWith("litigator")).length, non_residential_numbers: excluded.filter((e) => e.reason.startsWith("non-residential")).length,
-      held_propstream_dnc: held.length, already_in_ghl: existingL.filter((i) => i.ghl).length, already_in_our_database_not_ghl: existingL.filter((i) => !i.ghl).length,
-      existing_ghl_dnd: existingL.filter((i) => i.ghl?.dnd).length, multi_property_review: review.length, new_numbers: fresh.length, import_rows: outImp.length,
+      held_propstream_dnc: held.length, already_in_ghl: existingL.filter((i) => i.where === "in GHL").length, already_sent_not_in_ghl: existingL.filter((i) => i.where !== "in GHL").length,
+      existing_ghl_dnd: existingL.filter((i) => i.ghl?.dnd).length, multi_property_review: review.length, new_numbers: fresh.length, duplicate_in_list_skipped: dupL.length, import_rows: outImp.length, ...phoneStats,
       import_rows_new: outImp.length - dupRows, import_rows_duplicates: dupRows, import_rows_may_create_second_contact: trapRows,
       properties_new_to_list: newToList, properties_already_on_list: props.length - newToList, pct_new_to_list: Math.round(freshShare * 1000) / 10,
       pct_already_known: props.length ? Math.round((props.filter((x) => !x.wasNew).length / props.length) * 1000) / 10 : 0,
@@ -344,7 +376,7 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     const out = XLSX.utils.book_new();
     const add = (name: string, data: any[]) => XLSX.utils.book_append_sheet(out, data.length ? XLSX.utils.json_to_sheet(data) : XLSX.utils.aoa_to_sheet([["(none)"]]), name);
     add("Pull Report", Object.entries(report).map(([k, v]) => ({ Metric: k.replace(/_/g, " "), Value: typeof v === "object" ? JSON.stringify(v) : v })));
-    add("GHL Import", outImp); add("New Contacts", outNew); add("Existing GHL", outExist); add("Multi-Property Review", outRev); add("Held DNC", outHeld); add("Excluded", outExc);
+    add("Outreach Import", outImp); add("New Numbers", outNew); add("Already In Texting", outExist); add("Duplicate In List", outDup); add("Shared Numbers", outRev); add("Excluded", outExc);
     const xbuf = XLSX.write(out, { type: "buffer", bookType: "xlsx" });
     const csv = outImp.length ? XLSX.utils.sheet_to_csv(XLSX.utils.json_to_sheet(outImp)) : "";
     const stamp = NOW.slice(0, 19).replace(/[:T]/g, "-");
@@ -356,8 +388,8 @@ export async function processFile(buf: ArrayBuffer, filename: string, pullId: st
     const [batch] = await upsert("export_batches", [{ pull_id: pullId, upload_id: upload.upload_id, approved: false, counts: report }], { returning: true });
     await upsert("export_rows", [
       ...fresh.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "new", reason: null })),
-      ...existingL.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "existing", reason: i.ghl?.contact_id || `prior pull ${i.priorPull}` })),
-      ...review.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "review", reason: i.reason })),
+      ...existingL.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "in_texting", reason: i.ghl?.contact_id || i.where })),
+      ...dupL.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "dup_in_list", reason: keeper.get(i.phone) || null })),
       ...held.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone, bucket: "held", reason: i.reason })),
       ...excluded.map((i) => ({ batch_id: batch.batch_id, property_id: i.x.pid, phone: i.phone || i.raw, bucket: "excluded", reason: i.reason })),
     ]);
