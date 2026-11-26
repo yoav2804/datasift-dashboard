@@ -72,3 +72,10 @@ export async function signedDownload(bucket: string, path: string, filename: str
   const j = await r.json();
   return `${URL_}/storage/v1${j.signedURL}&download=${encodeURIComponent(filename)}`;
 }
+
+// Call a Postgres function (db/migrations). Returns its JSON result.
+export async function rpc<T = any>(fn: string, args: Record<string, any> = {}): Promise<T> {
+  const r = await fetch(`${REST}/rpc/${fn}`, { method: "POST", headers: h(), body: JSON.stringify(args), cache: "no-store" });
+  if (!r.ok) throw new Error(`rpc ${fn}: ${r.status} ${await r.text()}`);
+  return r.json();
+}
