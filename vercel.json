@@ -1,1 +1,1 @@
-{ "crons": [{ "path": "/api/sync-ghl", "schedule": "0 7 * * *" }, { "path": "/api/sync-messages", "schedule": "0 8 * * *" }] }
+{ "crons": [{ "path": "/api/sync-ghl", "schedule": "0 7 * * *" }, { "path": "/api/sync-messages", "schedule": "0 8 * * *" }, { "path": "/api/sync-textivo", "schedule": "30 8 * * *" }] }
