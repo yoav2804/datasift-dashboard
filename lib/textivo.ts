@@ -50,7 +50,10 @@ export async function syncTextivo() {
     const last = (await select("textivo_sync_runs", { ok: "eq.true", select: "started_at", order: "started_at.desc", limit: "1" }))[0];
     const since = last ? new Date(new Date(last.started_at).getTime() - 3 * 864e5).toISOString() : undefined;
 
-    const campaigns = await all(k, "/campaigns", { archived: "true" }).catch(() => all(k, "/campaigns"));
+    // active and archived campaigns (the archived filter alone returns only archived ones)
+    const byId = new Map<string, any>();
+    for (const c of [...(await all(k, "/campaigns")), ...(await all(k, "/campaigns", { archived: "true" }).catch(() => []))]) byId.set(String(c.id), c);
+    const campaigns = Array.from(byId.values());
     counts.campaigns = await store("campaign", campaigns);
     const kpis: any[] = [];
     for (const c of campaigns) { try { const j = await get(k, `/campaigns/${c.id}/kpi`); kpis.push({ id: c.id, ...(j?.data ?? j) }); } catch { /* one campaign failing doesn't stop the run */ } }
