@@ -7,6 +7,7 @@ import ZipCoverage from "../zipcoverage";
 import { loadRecycling } from "@/lib/recycling";
 import type { By } from "@/lib/lifecycle";
 import { marketShort } from "@/lib/lists";
+import { ORIGINS, originOf, Origin } from "@/lib/origin";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
@@ -31,16 +32,19 @@ function Table({ title, rows, label, extra }: { title: string; rows: [string, Ro
 }
 
 export default async function Tracker({ searchParams }: { searchParams: { by?: string } }) {
-  const by = (["list", "market", "source", "provider"].includes(searchParams?.by || "") ? searchParams.by : "list") as By;
+  const by = (["list", "market", "origin", "source", "provider"].includes(searchParams?.by || "") ? searchParams.by : "list") as By;
   let [exported, batches, tasks, profiles, zips, markets, outcomes, ups, sources] = await Promise.all([
     select("export_rows", { bucket: "eq.new", select: "property_id,batch_id" }), select("export_batches", { approved: "eq.true", voided_at: "is.null", select: "batch_id,pull_id,counts,created_at", order: "created_at.asc" }),
     select("pull_tasks", { select: "pull_id,profile_id,market_fips,zip_group,status,planned_date" }), select("profiles", { select: "profile_id,name,market_fips,doors_per_deal" }),
     select("zip_priorities", { select: "market_fips,zip,zip_group,doors_per_deal" }), select("markets", {}), select("outcomes", { select: "property_id,pull_id,event" }),
-    select("uploads", { status: "eq.confirmed", select: "pull_id,skip_trace_provider,original_source_id,report" }), select("sources", { select: "source_id,name" })]);
+    select("uploads", { status: "eq.confirmed", select: "pull_id,skip_trace_provider,original_source_id,report" }), select("sources", {})]);
   // where each pull came from and who skip traced it
   const srcName = new Map(sources.map((s: any) => [s.source_id, s.name]));
   const pullProv = new Map(ups.map((u: any) => [u.pull_id, u.skip_trace_provider || "Unknown"]));
   const pullSrc = new Map(ups.map((u: any) => [u.pull_id, srcName.get(u.original_source_id) || u.original_source_id || "Unknown"]));
+  const srcRow = new Map(sources.map((s: any) => [s.source_id, s]));
+  const originOfUpload = (u: any): Origin => originOf(srcRow.get(u?.original_source_id) || { source_id: u?.original_source_id });
+  const pullOrigin = new Map<string, Origin>(ups.map((u: any) => [u.pull_id, originOfUpload(u)]));
   const recycling = await loadRecycling();
   const recNames = new Map(Array.from(recycling.values()).map((R) => { const pr: any = profiles.find((p: any) => p.profile_id === R.profileId);
     return [R.key, `${pr?.name || R.profileId} (${marketShort(R.market)})${R.zipGroup !== "ALL" ? ` · ZIP group ${R.zipGroup}` : ""}`]; }));
@@ -59,18 +63,22 @@ export default async function Tracker({ searchParams }: { searchParams: { by?: s
   // primary attribution: the first pull that exported the property
   const firstPull = new Map<string, string>();
   for (const e of exported) { const pl = bPull.get(e.batch_id); if (pl && !firstPull.has(e.property_id)) firstPull.set(e.property_id, pl as string); }
-  const all = blank(), byM = new Map<string, Row>(), byL = new Map<string, Row>(), byZ = new Map<string, Row>(), byP = new Map<string, Row>(), byS = new Map<string, Row>();
+  const all = blank(), byM = new Map<string, Row>(), byL = new Map<string, Row>(), byZ = new Map<string, Row>(), byP = new Map<string, Row>(), byS = new Map<string, Row>(), byO = new Map<string, Row>();
   const keys = (pid: string, pullId?: string) => {
     const pl = pullId || firstPull.get(pid) || "";
     const p = prop.get(pid) || {}; const t: any = tk.get(pl) || {}; const pr: any = pf.get(t.profile_id);
     const m = mk.get(p.market_fips) || "Other";
     const z = zinfo.get(`${p.market_fips}|${p.zip}`);
-    return { m, sp: (pullProv.get(pl) as string) || "Unknown", so: (pullSrc.get(pl) as string) || "Unknown", l: pr ? `${pr.name} (${marketShort(pr.market_fips)})` : "Test / no list", z: `${p.zip || "?"} · ${marketShort(p.market_fips)}${z ? ` · group ${z.zip_group}` : ""}` };
+    return { m, o: (pullOrigin.get(pl) as string) || "provider", sp: (pullProv.get(pl) as string) || "Unknown", so: (pullSrc.get(pl) as string) || "Unknown", l: pr ? `${pr.name} (${marketShort(pr.market_fips)})` : "Test / no list", z: `${p.zip || "?"} · ${marketShort(p.market_fips)}${z ? ` · group ${z.zip_group}` : ""}` };
   };
   const get = (map: Map<string, Row>, k: string) => { if (!map.has(k)) map.set(k, blank()); return map.get(k)!; };
-  for (const e of exported) { const k = keys(e.property_id); for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z), get(byP, k.sp), get(byS, k.so)]) r.sent.add(e.property_id); }
+  for (const e of exported) { const k = keys(e.property_id); for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z), get(byP, k.sp), get(byS, k.so), get(byO, k.o)]) r.sent.add(e.property_id); }
   for (const o of outcomes) { if (!o.property_id || !STEPS.includes(o.event)) continue; const k = keys(o.property_id, o.pull_id);
-    for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z), get(byP, k.sp), get(byS, k.so)]) r.ev[o.event].add(o.property_id); }
+    for (const r of [all, get(byM, k.m), get(byL, k.l), get(byZ, k.z), get(byP, k.sp), get(byS, k.so), get(byO, k.o)]) r.ev[o.event].add(o.property_id); }
+  // data mix: how much of our data comes from providers, cities, county offices and courts
+  const mix = new Map<Origin, { uploads: number; props: number }>(ORIGINS.map((o) => [o.key, { uploads: 0, props: 0 }]));
+  for (const u of ups as any[]) { const c = mix.get(originOfUpload(u))!; c.uploads++; c.props += u.report?.unique_properties || 0; }
+  const mixTot = { uploads: 0, props: 0 }; mix.forEach((c) => { mixTot.uploads += c.uploads; mixTot.props += c.props; });
   // skip trace coverage per provider, from the upload reports
   const cov = new Map<string, any>();
   for (const u of ups as any[]) { const r = u.report || {}; const k = u.skip_trace_provider || "Unknown";
@@ -95,6 +103,16 @@ export default async function Tracker({ searchParams }: { searchParams: { by?: s
       <div className="stat"><div className="big">{per(t, all.ev.contract.size)}</div><div className="muted">doors per contract</div></div>
       <div className="stat"><div className="big">{per(t, all.ev.closed.size)}</div><div className="muted">doors per deal</div></div>
     </div>
+    <h2>Where our data comes from</h2>
+    <p className="sub">Every confirmed upload by the origin of its data: an external provider, a city, a county office or a court. Properties are counted per upload (a property on two pulls counts twice);
+      exported, texted and leads count each door once, under the first pull that exported it.</p>
+    <div className="tablewrap"><table><thead><tr><th>Origin</th><th>Uploads</th><th>Properties</th><th>% of properties</th><th>Doors exported</th><th>% of exported</th><th>Doors texted</th><th>% of texted</th><th>Leads</th><th>% of leads</th></tr></thead><tbody>
+      {ORIGINS.map((o) => { const c = mix.get(o.key)!; const r = byO.get(o.key) || blank();
+        return <tr key={o.key}><td><b>{o.label}</b> <span className="muted">{o.examples}</span></td><td>{n(c.uploads)}</td><td>{n(c.props)}</td><td><b>{pct(c.props, mixTot.props)}</b></td>
+          <td>{n(r.sent.size)}</td><td>{pct(r.sent.size, all.sent.size)}</td><td>{n(r.ev.contacted.size)}</td><td>{pct(r.ev.contacted.size, t)}</td>
+          <td>{n(r.ev.qualified.size)}</td><td>{pct(r.ev.qualified.size, q)}</td></tr>; })}
+      <tr style={{ fontWeight: 700 }}><td>Total</td><td>{n(mixTot.uploads)}</td><td>{n(mixTot.props)}</td><td>{mixTot.props ? "100%" : "–"}</td><td>{n(all.sent.size)}</td><td></td><td>{n(t)}</td><td></td><td>{n(q)}</td><td></td></tr>
+    </tbody></table></div>
     <Lifecycle by={by} />
     <h2>Skip trace quality</h2>
     <div className="grid">
