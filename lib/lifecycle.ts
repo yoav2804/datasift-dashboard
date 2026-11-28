@@ -3,8 +3,9 @@
 // (GHL contacts, GHL pipeline, message events). Anything not confirmed is shown as waiting / missing / not connected.
 import { select } from "./sb";
 import { marketShort } from "./lists";
+import { originOf, originLabel } from "./origin";
 
-export type By = "list" | "market" | "source" | "provider";
+export type By = "list" | "market" | "origin" | "source" | "provider";
 export type Stage = {
   uploads: number; properties: number; received: number; removed: number; removedWhy: Record<string, number>;
   inTexting: number; repeated: number; prepared: number; imported: number; importedProps: number; waiting: number; missing: number;
@@ -22,13 +23,14 @@ export async function loadLifecycle(by: By) {
     select("export_batches", { approved: "eq.true", voided_at: "is.null", select: "batch_id,upload_id,pull_id,imported_to_ghl_at" }),
     select("export_bucket_counts", {}), select("export_excluded_reasons", {}), select("outreach_counts_by_batch", {}),
     select("pull_tasks", { select: "pull_id,profile_id,market_fips,zip_group" }), select("profiles", { select: "profile_id,name" }),
-    select("sources", { select: "source_id,name" }), select("markets", { select: "fips,name" }),
+    select("sources", {}), select("markets", { select: "fips,name" }),
     select("outcomes", { select: "property_id,pull_id,event" }), select("message_events", { select: "message_id", limit: "1" })]);
   const tk = new Map(tasks.map((t: any) => [t.pull_id, t])); const pf = new Map(profiles.map((p: any) => [p.profile_id, p.name]));
-  const sn = new Map(sources.map((s: any) => [s.source_id, s.name])); const mn = new Map(markets.map((m: any) => [m.fips, m.name]));
+  const sn = new Map(sources.map((s: any) => [s.source_id, s.name])); const so = new Map(sources.map((s: any) => [s.source_id, s])); const mn = new Map(markets.map((m: any) => [m.fips, m.name]));
   const upOf = new Map(ups.map((u: any) => [u.upload_id, u])); const upByPull = new Map(ups.map((u: any) => [u.pull_id, u]));
   const keyOf = (pullId: string, u: any) => { const t: any = tk.get(pullId) || {};
     if (by === "market") return (mn.get(t.market_fips) as string) || "Other";
+    if (by === "origin") return originLabel(originOf(so.get(u?.original_source_id) || { source_id: u?.original_source_id }));
     if (by === "source") return (sn.get(u?.original_source_id) as string) || u?.original_source_id || "Unknown";
     if (by === "provider") return u?.skip_trace_provider || "Unknown";
     return `${pf.get(t.profile_id) || "no list"} (${marketShort(t.market_fips)})${t.zip_group && t.zip_group !== "ALL" ? ` · ZIP group ${t.zip_group}` : ""}`; };

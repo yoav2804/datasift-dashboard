@@ -2,7 +2,7 @@
 import { loadLifecycle, By, Stage } from "@/lib/lifecycle";
 const n = (v: number) => (v ?? 0).toLocaleString();
 const pct = (a: number, b: number) => (b ? `${((a / b) * 100).toFixed(1)}%` : "–");
-const BYS: [By, string][] = [["list", "List"], ["market", "Market"], ["source", "Original source"], ["provider", "Skip trace provider"]];
+const BYS: [By, string][] = [["list", "List"], ["market", "Market"], ["origin", "Data origin"], ["source", "Original source"], ["provider", "Skip trace provider"]];
 const why = (G: Stage) => Object.entries(G.removedWhy).sort((a, b) => b[1] - a[1]).map(([w, c]) => `${w}: ${c.toLocaleString()}`).join(" · ");
 
 export default async function Lifecycle({ by }: { by: By }) {
